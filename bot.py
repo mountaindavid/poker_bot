@@ -72,6 +72,7 @@ Admin commands:
 /overall_results — Show overall results across all games
 /avg_profit — Show average profit per game
 /remove_player — Remove a player from the current game
+/adjust — Adjust buy-in, rebuy, cashout, or clear for a player
     """
     bot.reply_to(message, admin_commands)
 
@@ -745,6 +746,147 @@ def handle_remove_player_callback(call):
     finally:
         if 'conn' in locals():
             conn.close()
+
+
+# Add new adjust function
+@bot.message_handler(commands=['adjust'])
+def adjust(message):
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    conn = sqlite3.connect('poker.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    game = c.fetchone()
+    if not game:
+        bot.reply_to(message, "❌ No active game found.")
+        conn.close()
+        return
+    game_id = game[0]
+    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = ?", (game_id,))
+    players = c.fetchall()
+    if not players:
+        bot.reply_to(message, "❌ No players in the current game.")
+        conn.close()
+        return
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    for player_id, name in players:
+        keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"adjust_{game_id}_{player_id}"))
+    bot.reply_to(message, f"Select a player to adjust in game #{game_id}:", reply_markup=keyboard)
+    conn.close()
+
+# Add callback handler for player selection
+@bot.callback_query_handler(func=lambda call: call.data.startswith('adjust_'))
+def handle_adjust_player_callback(call):
+    try:
+        _, game_id, player_id = call.data.split('_')
+        game_id = int(game_id)
+        player_id = int(player_id)
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        player = c.fetchone()
+        if not player:
+            bot.answer_callback_query(call.id, "Invalid player ID.")
+            conn.close()
+            return
+        name = player[0]
+        keyboard = telebot.types.InlineKeyboardMarkup()
+        keyboard.row(
+            telebot.types.InlineKeyboardButton(text="Rebuy", callback_data=f"rebuy_{game_id}_{player_id}"),
+            telebot.types.InlineKeyboardButton(text="Cashout", callback_data=f"cashout_{game_id}_{player_id}")
+        )
+        keyboard.add(telebot.types.InlineKeyboardButton(text="Clear", callback_data=f"clear_{game_id}_{player_id}"))
+        bot.edit_message_text(f"Adjust for {name} in game #{game_id}:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+    except Exception as e:
+        print("Error in adjust player callback:", e)
+        bot.answer_callback_query(call.id, "Error selecting player.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Add callback handler for rebuy, cashout, and clear actions
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('rebuy_', 'cashout_', 'clear_')))
+def handle_adjust_action_callback(call):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        action, game_id, player_id = call.data.split('_')
+        game_id = int(game_id)
+        player_id = int(player_id)
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        player = c.fetchone()
+        if not player:
+            bot.answer_callback_query(call.id, "Invalid player ID.")
+            conn.close()
+            return
+        name = player[0]
+        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        if not c.fetchone():
+            bot.answer_callback_query(call.id, f"{name} is not in game #{game_id}.")
+            conn.close()
+            return
+        if action == 'clear':
+            c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+            transactions = c.fetchall()
+            for amount, trans_type in transactions:
+                if trans_type in ['buyin', 'rebuy']:
+                    c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+                elif trans_type == 'cashout':
+                    c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
+            c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+            c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+            c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+            conn.commit()
+            bot.answer_callback_query(call.id, f"{name}'s transactions cleared in game #{game_id}{suits}.")
+            bot.edit_message_text(f"✅ {name}'s transactions and participation in game #{game_id} cleared{suits}.", call.message.chat.id, call.message.message_id)
+        else:
+            action_type = 'rebuy' if action == 'rebuy' else 'cashout'
+            bot.edit_message_text(f"Enter {action_type} amount for {name} in game #{game_id} (example: 20 or 20.5):", call.message.chat.id, call.message.message_id)
+            bot.register_next_step_handler_by_chat_id(call.message.chat.id, lambda m: process_adjust_amount(m, game_id, player_id, action_type, name))
+    except Exception as e:
+        print(f"Error in {action} callback:", e)
+        bot.answer_callback_query(call.id, f"Error processing {action}.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Add function to process rebuy or cashout amount
+def process_adjust_amount(message, game_id, player_id, action_type, name):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        amount = float(message.text.strip())
+        if not (amount > 0 and round(amount, 1) == amount):
+            raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT id FROM games WHERE id = ? AND is_active = 1", (game_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ No active game found.")
+            conn.close()
+            return
+        c.execute("SELECT id FROM players WHERE id = ?", (player_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ Invalid player ID.")
+            conn.close()
+            return
+        amount_value = -amount if action_type == 'rebuy' else amount
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
+                  (player_id, game_id, amount_value, action_type))
+        if action_type == 'rebuy':
+            c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
+        else:
+            c.execute("UPDATE players SET total_cashout = total_cashout + ? WHERE id = ?", (amount, player_id))
+        conn.commit()
+        bot.reply_to(message, f"✅ {name} {action_type} of {amount:.1f}{suits} in game #{game_id}.")
+    except Exception as e:
+        print(f"Error in {action_type} amount processing:", e)
+        bot.reply_to(message, f"❌ Try again. Example: 20 or 20.5")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 
 # Start bot
 if __name__ == '__main__':
