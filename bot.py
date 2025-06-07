@@ -7,6 +7,7 @@ load_dotenv()
 
 # Bot setup
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMINS = [300526718, 7282197423]
 bot = telebot.TeleBot(TOKEN)
 
 # Initialize SQLite database
@@ -45,23 +46,16 @@ def init_db():
     conn.close()
 
 
-@bot.message_handler(commands=['help'])
+@bot.message_handler(commands=['menu'])
 def help_command(message):
-    commands = """
-🃏Basic commands:
-/new_game — New poker game
+    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.row('/new_game', '/join')
+    keyboard.row('/rebuy', '/cashout')
+    keyboard.row('/reset', '/end_game')
+    keyboard.row('/game_results', '/menu')
 
-/join — Join the current game
-/rebuy — Add a rebuy
-/cashout — Add a cashout
-/reset — Reset your profile
+    bot.send_message(message.chat.id, "🃏 Tap a command to execute:", reply_markup=keyboard)
 
-/end_game — End the current game (creator)
-
-/game_results — Show results for a game by ID
-/help — Show this help message
-"""
-    bot.reply_to(message, commands)
 
 
 @bot.message_handler(commands=['admin'])
@@ -89,22 +83,10 @@ def register(message):
     conn.close()
     bot.reply_to(message,
                  f"{name}, you are registered!\n\n"
-                 f"🃏 Basic commands:\n"
-                 f"/new_game — Start a new poker game\n"
-                 f"\n"
-                 f"/join — Join the current game\n"
-                 f"/rebuy — Add a rebuy\n"
-                 f"/cashout — Add a cashout\n"
-                 f"\n"
-                 f"/end_game — End the current game\n"
-                 f"\n"
-                 f"/game_results — Game results\n"
-                 f"/help — Show this help message"
+                 f"Push /menu "
                  )
 
 
-# List of user IDs allowed to create games
-ADMINS = [300526718, ]
 # New game
 @bot.message_handler(commands=['new_game'])
 def new_game(message):
@@ -128,19 +110,19 @@ def end_game(message):
     user_id = message.from_user.id
     conn = sqlite3.connect('poker.db')
     c = conn.cursor()
-    #get active game ID
-    c.execute("SELECT id, creator_id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    # Get active game ID and creator info
+    c.execute("SELECT g.id, g.creator_id, p.name FROM games g JOIN players p ON g.creator_id = p.telegram_id WHERE g.is_active = 1 ORDER BY g.id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
-    game_id, creator_id = game
-    if user_id != creator_id:
-        bot.reply_to(message, "❌ Only the game creator can end the game.")
+    game_id, creator_id, creator_name = game
+    if user_id != creator_id and user_id != 300526718:
+        bot.reply_to(message, f"❌ Only the game creator ({creator_name}) or admin (ID: 300526718) can end the game.")
         conn.close()
         return
-    #endgame
+    # End game
     c.execute("UPDATE games SET is_active = 0 WHERE is_active = 1")
     conn.commit()
     bot.reply_to(message, f"Game #{game_id} ended.")
@@ -705,6 +687,8 @@ def remove_player(message):
         keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"remove_{game_id}_{player_id}"))
     bot.reply_to(message, f"Select a player to remove from game #{game_id}:", reply_markup=keyboard)
     conn.close()
+
+
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
 def handle_remove_player_callback(call):
