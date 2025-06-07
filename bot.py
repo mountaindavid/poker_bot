@@ -1,5 +1,5 @@
+#bot.py
 import telebot, os, random
-from telebot import types
 import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
@@ -876,6 +876,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
 # Start bot
 if __name__ == '__main__':
     init_db()
-    bot.remove_webhook()
-    bot.polling()
+    if not os.getenv("RAILWAY_ENVIRONMENT"):
+        bot.remove_webhook()
+        bot.polling()
 
