@@ -16,8 +16,8 @@ def init_db():
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
                      telegram_id INTEGER UNIQUE,
                      name TEXT,
-                     total_buyin INTEGER DEFAULT 0,
-                     total_cashout INTEGER DEFAULT 0,
+                     total_buyin REAL DEFAULT 0.0,  -- Changed from INTEGER to REAL
+                     total_cashout REAL DEFAULT 0.0,  -- Changed from INTEGER to REAL
                      registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
                      games_played INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS games (
@@ -213,9 +213,9 @@ def process_buyin(message):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount_text = message.text.strip()
-        if not amount_text.isdigit():
-            raise ValueError("Only numbers are allowed.")
-        amount = int(amount_text)
+        amount = float(amount_text)
+        if not (amount > 0 and round(amount, 1) == amount):
+            raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
         name = message.from_user.first_name
 
@@ -240,7 +240,7 @@ def process_buyin(message):
             return
         player_id = player[0]
 
-        # Check if already joined (to prevent race conditions)
+        # Check if already joined
         c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
         if c.fetchone():
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
@@ -259,10 +259,10 @@ def process_buyin(message):
         c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount}{suits}.")
+        bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount:.1f}{suits}.")
     except Exception as e:
         print("Error in buy-in process:", e)
-        bot.reply_to(message, "❌Try to /join again. Example: 20")
+        bot.reply_to(message, "❌ Try to /join again. Example: 20 or 20.5")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -308,7 +308,9 @@ def rebuy(message):
 def process_rebuy(message):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
-        amount = int(message.text.strip())
+        amount = float(message.text.strip())
+        if not (amount > 0 and round(amount, 1) == amount):
+            raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
         name = message.from_user.first_name
 
@@ -320,8 +322,8 @@ def process_rebuy(message):
         row = c.fetchone()
         if not row:
             bot.reply_to(message, "❌ No active game found.")
+            conn.close()
             return
-
         game_id = row[0]
 
         # Check player registration
@@ -329,22 +331,22 @@ def process_rebuy(message):
         player = c.fetchone()
         if not player:
             bot.reply_to(message, "❌ You are not registered. Use /start.")
+            conn.close()
             return
-
         player_id = player[0]
 
         # Insert rebuy record
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
                   (player_id, game_id, -amount, 'rebuy'))
 
-        #update total rebuy
+        # Update total buy-in
         c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} made a rebuy of {amount}{suits} in game #{game_id}.")
+        bot.reply_to(message, f"✅ {name} made a rebuy of {amount:.1f}{suits} in game #{game_id}.")
     except Exception as e:
         print("Error in rebuy:", e)
-        bot.reply_to(message, "❌ Try to /rebuy again. Example: 20")
+        bot.reply_to(message, "❌ Try to /rebuy again. Example: 20 or 20.5")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -390,7 +392,9 @@ def cashout(message):
 def process_cashout(message):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
-        amount = int(message.text.strip())
+        amount = float(message.text.strip())
+        if not (amount > 0 and round(amount, 1) == amount):
+            raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
         name = message.from_user.first_name
 
@@ -402,6 +406,7 @@ def process_cashout(message):
         row = c.fetchone()
         if not row:
             bot.reply_to(message, "❌ No active game session.")
+            conn.close()
             return
         game_id = row[0]
 
@@ -410,6 +415,7 @@ def process_cashout(message):
         player = c.fetchone()
         if not player:
             bot.reply_to(message, "❌ You are not registered. Use /start.")
+            conn.close()
             return
         player_id = player[0]
 
@@ -417,14 +423,14 @@ def process_cashout(message):
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
                   (player_id, game_id, amount, 'cashout'))
 
-        # update cashout
+        # Update total cashout
         c.execute("UPDATE players SET total_cashout = total_cashout + ? WHERE id = ?", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} cashed out {amount}{suits} in game #{game_id}.")
+        bot.reply_to(message, f"✅ {name} cashed out {amount:.1f}{suits} in game #{game_id}.")
     except Exception as e:
         print("Cashout error:", e)
-        bot.reply_to(message, "❌ Try to /cashout again. Example: 20")
+        bot.reply_to(message, "❌ Try to /cashout again. Example: 20 or 20.5")
     finally:
         if 'conn' in locals():
             conn.close()
