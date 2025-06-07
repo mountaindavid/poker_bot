@@ -1,4 +1,4 @@
-import telebot
+import telebot, os
 from telebot import types
 import sqlite3
 from datetime import datetime
@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Настройка бота
-TOKEN = "7695681893:AAGt9Tf-Ov1NIfwVKn1DwDgPcRuxHbK01eA"
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+bot = telebot.TeleBot(TOKEN)
 
 
 # Инициализация базы данных SQLite
