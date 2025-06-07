@@ -9,10 +9,11 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMINS = [300526718, 7282197423]
 bot = telebot.TeleBot(TOKEN)
+db_name = "poker.db"
 
 # Initialize SQLite database
 def init_db():
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS players (
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +77,7 @@ Admin commands:
 def register(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO players (telegram_id, name) VALUES (?, ?)", (user_id, name))
     conn.commit()
@@ -93,7 +94,7 @@ def new_game(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "Please wait for an admin.")
         return
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     active_game = c.fetchone()
@@ -108,7 +109,7 @@ def new_game(message):
 @bot.message_handler(commands=['end_game'])
 def end_game(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     # Get active game ID and creator info
     c.execute("SELECT g.id, g.creator_id, p.name FROM games g JOIN players p ON g.creator_id = p.telegram_id WHERE g.is_active = 1 ORDER BY g.id DESC LIMIT 1")
@@ -119,7 +120,7 @@ def end_game(message):
         return
     game_id, creator_id, creator_name = game
     if user_id != creator_id and user_id != 300526718:
-        bot.reply_to(message, f"❌ Only the game creator ({creator_name}) or admin (ID: 300526718) can end the game.")
+        bot.reply_to(message, f"❌ Only the game creator ({creator_name}) can end the game.")
         conn.close()
         return
     # End game
@@ -133,7 +134,7 @@ def process_game_password(message):
         password = message.text.strip()
         if not (password.isdigit() and len(password) == 4):
             raise ValueError("Password must be 4 digits. /new_game")
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("INSERT INTO games (date, is_active, password, creator_id) VALUES (?, 1, ?, ?)",
                   (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), password, message.from_user.id))
@@ -149,7 +150,7 @@ def process_game_password(message):
 def join_game(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     c = conn.cursor()
     # Check if player is registered
@@ -180,7 +181,7 @@ def process_join_password(message, game_id, correct_password, player_id, name):
         if password != correct_password:
             bot.reply_to(message, "❌ Incorrect password. Try to /join again")
             return
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
         if c.fetchone():
@@ -205,7 +206,7 @@ def process_buyin(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
 
         # Get the ID of the currently active game
@@ -259,7 +260,7 @@ def process_buyin(message):
 def rebuy(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
 
     # Check active game
@@ -300,7 +301,7 @@ def process_rebuy(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
 
         # Get active game
@@ -343,7 +344,7 @@ def process_rebuy(message):
 def cashout(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
 
     # Check active game
@@ -384,7 +385,7 @@ def process_cashout(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
 
         # Find active game
@@ -425,7 +426,7 @@ def process_cashout(message):
 def reset(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
@@ -459,7 +460,7 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         if password != correct_password:
             bot.reply_to(message, "❌ Incorrect password. Try /reset again.")
             return
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
         transactions = c.fetchall()
@@ -486,7 +487,7 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
 @bot.message_handler(commands=['game_results'])
 def game_results(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
 
     # search active game
@@ -512,7 +513,7 @@ def process_game_results(message):
         bot.reply_to(message, "❌ Try to see /game_results again with correct game ID.")
 
 def send_game_results_to_user(game_id, chat_id):
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("""
         SELECT p.name, 
@@ -564,7 +565,7 @@ def send_game_results_to_user(game_id, chat_id):
 # Overall results
 @bot.message_handler(commands=['overall_results'])
 def overall_results(message):
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("""
                 SELECT p.name, 
@@ -610,7 +611,7 @@ def overall_results(message):
 # average profit per game
 @bot.message_handler(commands=['avg_profit'])
 def avg_profit(message):
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("""
         SELECT p.name, AVG(s.total)
@@ -637,7 +638,7 @@ def check_db(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "Access denied!")
         return
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("SELECT * FROM players")
     players = c.fetchall()
@@ -667,7 +668,7 @@ def remove_player(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
         return
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
@@ -697,7 +698,7 @@ def handle_remove_player_callback(call):
         _, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
         player = c.fetchone()
@@ -738,7 +739,7 @@ def adjust(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
         return
-    conn = sqlite3.connect('poker.db')
+    conn = sqlite3.connect(db_name)
     c = conn.cursor()
     c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
@@ -766,7 +767,7 @@ def handle_adjust_player_callback(call):
         _, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
         player = c.fetchone()
@@ -797,7 +798,7 @@ def handle_adjust_action_callback(call):
         action, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
         player = c.fetchone()
@@ -843,7 +844,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
         amount = float(message.text.strip())
         if not (amount > 0 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
-        conn = sqlite3.connect('poker.db')
+        conn = sqlite3.connect(db_name)
         c = conn.cursor()
         c.execute("SELECT id FROM games WHERE id = ? AND is_active = 1", (game_id,))
         if not c.fetchone():
