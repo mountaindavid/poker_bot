@@ -17,5 +17,7 @@ def webhook():
 def index():
     return "Poker Bot is alive!", 200
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+if __name__ == '__main__':
+    from os import getenv
+    port = int(getenv("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
