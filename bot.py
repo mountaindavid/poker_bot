@@ -23,7 +23,9 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS games (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  date TEXT,
-                 is_active INTEGER DEFAULT 1)''')
+                 is_active INTEGER DEFAULT 1,
+                 password TEXT,
+                 creator_id INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  player_id INTEGER,
@@ -46,7 +48,6 @@ def init_db():
 def help_command(message):
     commands = """
 🃏Basic commands:
-/start — Register as a player
 /new_game — New poker game (admins only)
 
 /join — Join the current game
@@ -54,6 +55,7 @@ def help_command(message):
 /cashout — Add a cashout
 
 /end_game — End the current game (admins only)
+
 /game_results — Show results for a game by ID
 /help — Show this help message
 """
@@ -84,12 +86,14 @@ def register(message):
     bot.reply_to(message,
                  f"{name}, you are registered!\n\n"
                  f"🃏 Basic commands:\n"
-                 f"/start — Register as a player\n"
                  f"/new_game — Start a new poker game\n"
+                 f"\n"
                  f"/join — Join the current game\n"
                  f"/rebuy — Add a rebuy\n"
                  f"/cashout — Add a cashout\n"
+                 f"\n"
                  f"/end_game — End the current game\n"
+                 f"\n"
                  f"/game_results — Game results\n"
                  f"/help — Show this help message"
                  )
@@ -105,40 +109,55 @@ def new_game(message):
         return
     conn = sqlite3.connect('poker.db')
     c = conn.cursor()
-    c.execute("SELECT id FROM games WHERE is_active = 1")
-    active = c.fetchone()
-    if active:
-        bot.reply_to(message, f"Game #{active[0]} is already active. End it first with /end_game.")
-    else:
-        c.execute("INSERT INTO games (date, is_active) VALUES (?, 1)", (datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
-        game_id = c.lastrowid
-        conn.commit()
-        bot.reply_to(message, f"Game #{game_id} created!")
+    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    active_game = c.fetchone()
     conn.close()
-
+    if active_game:
+        bot.reply_to(message, f"❌ Game #{active_game[0]} is already active. End it first with /end_game.")
+        return
+    bot.reply_to(message, "Enter a 4-digit password for the game:")
+    bot.register_next_step_handler(message, process_game_password)
 
 # End game
 @bot.message_handler(commands=['end_game'])
 def end_game(message):
-    if message.from_user.id not in ADMINS:
-        bot.reply_to(message, "Please wait for an admin.")
-        return
+    user_id = message.from_user.id
     conn = sqlite3.connect('poker.db')
     c = conn.cursor()
-    # Get active game ID
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    #get active game ID
+    c.execute("SELECT id, creator_id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
-    game_id = game[0]
-    # End the game
+    game_id, creator_id = game
+    if user_id != creator_id:
+        bot.reply_to(message, "❌ Only the game creator can end the game.")
+        conn.close()
+        return
+    #endgame
     c.execute("UPDATE games SET is_active = 0 WHERE is_active = 1")
     conn.commit()
     bot.reply_to(message, f"Game #{game_id} ended.")
     conn.close()
 
+def process_game_password(message):
+    try:
+        password = message.text.strip()
+        if not (password.isdigit() and len(password) == 4):
+            raise ValueError("Password must be 4 digits. /new_game")
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("INSERT INTO games (date, is_active, password, creator_id) VALUES (?, 1, ?, ?)",
+                  (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), password, message.from_user.id))
+        game_id = c.lastrowid
+        conn.commit()
+        bot.reply_to(message, f"Game #{game_id} created with password {password}!")
+        conn.close()
+    except Exception as e:
+        print("Error creating game:", e)
+        bot.reply_to(message, "❌ Enter a valid 4-digit password. /new_game")
 
 @bot.message_handler(commands=['join'])
 def join_game(message):
@@ -156,23 +175,39 @@ def join_game(message):
         return
     player_id = player[0]
     # Check active game
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id, password FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
-    game_id = game[0]
-    # Check if already joined
-    c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-    if c.fetchone():
-        bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
-        conn.close()
-        return
-    # Request buy-in amount
-    bot.reply_to(message, f"{name}, enter buy-in amount (example: 20):")
-    bot.register_next_step_handler(message, process_buyin)
+    game_id, password = game
+    bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
+    bot.register_next_step_handler(message, lambda m: process_join_password(m, game_id, password, player_id, name))
     conn.close()
+
+
+def process_join_password(message, game_id, correct_password, player_id, name):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        password = message.text.strip()
+        if password != correct_password:
+            bot.reply_to(message, "❌ Incorrect password. Try to /join again")
+            return
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        if c.fetchone():
+            bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
+            conn.close()
+            return
+        bot.reply_to(message, f"{suits}{name}, enter buy-in amount (example: 20):")
+        bot.register_next_step_handler(message, process_buyin)
+        conn.close()
+    except Exception as e:
+        print("Error joining game:", e)
+        bot.reply_to(message, "❌ Try to /join again.")
+
 
 def process_buyin(message):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
@@ -271,6 +306,7 @@ def rebuy(message):
     conn.close()
 
 def process_rebuy(message):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = int(message.text.strip())
         user_id = message.from_user.id
@@ -305,7 +341,7 @@ def process_rebuy(message):
         c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} made a rebuy of {amount} in game #{game_id}.")
+        bot.reply_to(message, f"✅ {name} made a rebuy of {amount}{suits} in game #{game_id}.")
     except Exception as e:
         print("Error in rebuy:", e)
         bot.reply_to(message, "❌ Try to /rebuy again. Example: 20")
@@ -352,6 +388,7 @@ def cashout(message):
     conn.close()
 
 def process_cashout(message):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = int(message.text.strip())
         user_id = message.from_user.id
@@ -384,7 +421,7 @@ def process_cashout(message):
         c.execute("UPDATE players SET total_cashout = total_cashout + ? WHERE id = ?", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} cashed out {amount} in game #{game_id}.")
+        bot.reply_to(message, f"✅ {name} cashed out {amount}{suits} in game #{game_id}.")
     except Exception as e:
         print("Cashout error:", e)
         bot.reply_to(message, "❌ Try to /cashout again. Example: 20")
@@ -500,8 +537,8 @@ def overall_results(message):
 
     # Create table header
     response = "📊 Overall Results:\n"
-    response += "Name        | Games | Total $ | Profitable Games (%)\n"
-    response += "-" * 50 + "\n"
+    response += f"{'Name':<15} | {'Games':<8} | {'Total $':<10} | {'Profitable Games':<18}\n"
+    response += "-" * 55 + "\n"
 
     # Fill table rows
     for name, games_played, total_profit, positive_games, total_games in results:
@@ -509,7 +546,11 @@ def overall_results(message):
         total_games = total_games or 0
         positive_games = positive_games or 0
         profitable_percent = (positive_games / total_games * 100) if total_games > 0 else 0
-        response += f"{name:<15} | {games_played:<12} | {'+' if total_profit > 0 else ''}{total_profit:<12} | {profitable_percent:.1f}% ({positive_games}/{total_games})\n"
+        # Truncate name to 15 characters
+        name = name[:15]
+        # Format total_profit to ensure consistent width
+        profit_str = f"{'+' if total_profit > 0 else ''}{total_profit}"
+        response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {profitable_percent:>5.1f}% ({positive_games}/{total_games})\n"
 
     bot.reply_to(message, response)
 
