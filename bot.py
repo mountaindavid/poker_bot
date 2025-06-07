@@ -876,5 +876,6 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
 # Start bot
 if __name__ == '__main__':
     init_db()
+    bot.remove_webhook()
     bot.polling()
 
