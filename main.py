@@ -19,5 +19,7 @@ def index():
 
 if __name__ == '__main__':
     from os import getenv
-    port = int(getenv("PORT", 5000))
+    port = int(getenv("PORT", 8443))
+    bot.remove_webhook()  # Удаляем старый вебхук, если есть
+    bot.set_webhook(url=f'{getenv("WEBHOOK_URL")}/{TOKEN}')
     app.run(host='0.0.0.0', port=port)
