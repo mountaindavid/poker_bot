@@ -1,4 +1,5 @@
 import telebot, os, random
+from telebot import types
 import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
@@ -48,13 +49,14 @@ def init_db():
 def help_command(message):
     commands = """
 🃏Basic commands:
-/new_game — New poker game (admins only)
+/new_game — New poker game
 
 /join — Join the current game
 /rebuy — Add a rebuy
 /cashout — Add a cashout
+/reset — Reset your profile
 
-/end_game — End the current game (admins only)
+/end_game — End the current game (creator)
 
 /game_results — Show results for a game by ID
 /help — Show this help message
@@ -66,9 +68,10 @@ def help_command(message):
 def show_admin_commands(message):
     admin_commands = """
 Admin commands:
-/check_db — Admin command: list all registered players
+/check_db — List all registered players
 /overall_results — Show overall results across all games
 /avg_profit — Show average profit per game
+/remove_player — Remove a player from the current game
     """
     bot.reply_to(message, admin_commands)
 
@@ -435,6 +438,66 @@ def process_cashout(message):
         if 'conn' in locals():
             conn.close()
 
+@bot.message_handler(commands=['reset'])
+def reset(message):
+    user_id = message.from_user.id
+    name = message.from_user.first_name
+    conn = sqlite3.connect('poker.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    game = c.fetchone()
+    if not game:
+        bot.reply_to(message, "❌ No active game found.")
+        conn.close()
+        return
+    game_id = game[0]
+    c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+    player = c.fetchone()
+    if not player:
+        bot.reply_to(message, "❌ You are not registered. Use /start.")
+        conn.close()
+        return
+    player_id = player[0]
+    c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+    if not c.fetchone():
+        bot.reply_to(message, "❌ You are not in the current game.")
+        conn.close()
+        return
+    c.execute("SELECT password FROM games WHERE id = ?", (game_id,))
+    password = c.fetchone()[0]
+    bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
+    bot.register_next_step_handler(message, lambda m: process_reset_password(m, game_id, password, player_id, name))
+    conn.close()
+
+def process_reset_password(message, game_id, correct_password, player_id, name):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        password = message.text.strip()
+        if password != correct_password:
+            bot.reply_to(message, "❌ Incorrect password. Try /reset again.")
+            return
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        transactions = c.fetchall()
+        for amount, trans_type in transactions:
+            if trans_type in ['buyin', 'rebuy']:
+                c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+            elif trans_type == 'cashout':
+                c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
+        c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+        conn.commit()
+        bot.reply_to(message, f"✅ {name}'s transactions and participation in game #{game_id} have been reset{suits}.")
+    except Exception as e:
+        print("Error in reset:", e)
+        bot.reply_to(message, "❌ Error resetting. Try /reset again.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
 
 # game results
 @bot.message_handler(commands=['game_results'])
@@ -509,7 +572,7 @@ def send_game_results_to_user(game_id, chat_id):
         f"\n💰 Game total:\n"
         f"  Buy-ins + Rebuys = {total_in}\n"
         f"  Cashouts = {total_out}\n"
-        f"  Difference = {diff if diff != 0 else '✅ OK — balanced'}"
+        f"  Difference = {round(diff, 1) if diff != 0 else '✅ OK — balanced'}"
     )
 
     bot.send_message(chat_id, response)
@@ -615,6 +678,73 @@ def check_db(message):
         )
     bot.reply_to(message, response)
 
+
+@bot.message_handler(commands=['remove_player'])
+def remove_player(message):
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    conn = sqlite3.connect('poker.db')
+    c = conn.cursor()
+    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    game = c.fetchone()
+    if not game:
+        bot.reply_to(message, "❌ No active game found.")
+        conn.close()
+        return
+    game_id = game[0]
+    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = ?", (game_id,))
+    players = c.fetchall()
+    if not players:
+        bot.reply_to(message, "❌ No players in the current game.")
+        conn.close()
+        return
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    for player_id, name in players:
+        keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"remove_{game_id}_{player_id}"))
+    bot.reply_to(message, f"Select a player to remove from game #{game_id}:", reply_markup=keyboard)
+    conn.close()
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
+def handle_remove_player_callback(call):
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        _, game_id, player_id = call.data.split('_')
+        game_id = int(game_id)
+        player_id = int(player_id)
+        conn = sqlite3.connect('poker.db')
+        c = conn.cursor()
+        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        player = c.fetchone()
+        if not player:
+            bot.answer_callback_query(call.id, "Invalid player ID.")
+            conn.close()
+            return
+        name = player[0]
+        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        if not c.fetchone():
+            bot.answer_callback_query(call.id, f"{name} is not in game #{game_id}.")
+            conn.close()
+            return
+        c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        transactions = c.fetchall()
+        for amount, trans_type in transactions:
+            if trans_type in ['buyin', 'rebuy']:
+                c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+            elif trans_type == 'cashout':
+                c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
+        c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+        conn.commit()
+        bot.answer_callback_query(call.id, f"{name} removed from game #{game_id}{suits}.")
+        bot.edit_message_text(f"✅ {name} removed from game #{game_id}{suits}.", call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        print("Error in remove_player callback:", e)
+        bot.answer_callback_query(call.id, "Error removing player.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 # Start bot
 if __name__ == '__main__':
