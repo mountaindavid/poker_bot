@@ -11,6 +11,19 @@ ADMINS = [300526718, 7282197423]
 bot = telebot.TeleBot(TOKEN)
 db_name = "poker.db"
 
+
+
+def safe_handler(func):
+    """Декоратор для безопасной обработки команд"""
+    def wrapper(message):
+        try:
+            return func(message)
+        except Exception as e:
+            logger.error(f"Error in {func.__name__}: {e}")
+            bot.reply_to(message, f"❌ Произошла ошибка: {str(e)}")
+    return wrapper
+
+
 # Initialize SQLite database
 def init_db():
     conn = sqlite3.connect(db_name)
@@ -48,6 +61,7 @@ def init_db():
 
 
 @bot.message_handler(commands=['menu'])
+@safe_handler
 def help_command(message):
     keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row('/new_game', '/join')
@@ -60,6 +74,7 @@ def help_command(message):
 
 
 @bot.message_handler(commands=['admin'])
+@safe_handler
 def show_admin_commands(message):
     admin_commands = """
 Admin commands:
@@ -74,6 +89,7 @@ Admin commands:
 
 # Player registration
 @bot.message_handler(commands=['start'])
+@safe_handler
 def register(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
@@ -90,6 +106,7 @@ def register(message):
 
 # New game
 @bot.message_handler(commands=['new_game'])
+@safe_handler
 def new_game(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "Please wait for an admin.")
@@ -107,6 +124,7 @@ def new_game(message):
 
 # End game
 @bot.message_handler(commands=['end_game'])
+@safe_handler
 def end_game(message):
     user_id = message.from_user.id
     conn = sqlite3.connect(db_name)
@@ -147,6 +165,7 @@ def process_game_password(message):
         bot.reply_to(message, "❌ Enter a valid 4-digit password. /new_game")
 
 @bot.message_handler(commands=['join'])
+@safe_handler
 def join_game(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
@@ -257,6 +276,7 @@ def process_buyin(message):
 
 # Add rebuy
 @bot.message_handler(commands=['rebuy'])
+@safe_handler
 def rebuy(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
@@ -341,6 +361,7 @@ def process_rebuy(message):
 
 # Add cashout
 @bot.message_handler(commands=['cashout'])
+@safe_handler
 def cashout(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
@@ -423,6 +444,7 @@ def process_cashout(message):
             conn.close()
 
 @bot.message_handler(commands=['reset'])
+@safe_handler
 def reset(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
@@ -485,6 +507,7 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
 
 # game results
 @bot.message_handler(commands=['game_results'])
+@safe_handler
 def game_results(message):
     user_id = message.from_user.id
     conn = sqlite3.connect(db_name)
@@ -564,6 +587,7 @@ def send_game_results_to_user(game_id, chat_id):
 
 # Overall results
 @bot.message_handler(commands=['overall_results'])
+@safe_handler
 def overall_results(message):
     conn = sqlite3.connect(db_name)
     c = conn.cursor()
@@ -610,6 +634,7 @@ def overall_results(message):
 
 # average profit per game
 @bot.message_handler(commands=['avg_profit'])
+@safe_handler
 def avg_profit(message):
     conn = sqlite3.connect(db_name)
     c = conn.cursor()
@@ -633,6 +658,7 @@ def avg_profit(message):
 
 #ADMINS
 @bot.message_handler(commands=['check_db'])
+@safe_handler
 def check_db(message):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     if message.from_user.id not in ADMINS:
@@ -664,6 +690,7 @@ def check_db(message):
 
 
 @bot.message_handler(commands=['remove_player'])
+@safe_handler
 def remove_player(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
@@ -692,6 +719,7 @@ def remove_player(message):
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
+@safe_handler
 def handle_remove_player_callback(call):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
@@ -735,6 +763,7 @@ def handle_remove_player_callback(call):
 
 # Add new adjust function
 @bot.message_handler(commands=['adjust'])
+@safe_handler
 def adjust(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
@@ -762,6 +791,7 @@ def adjust(message):
 
 # Add callback handler for player selection
 @bot.callback_query_handler(func=lambda call: call.data.startswith('adjust_'))
+@safe_handler
 def handle_adjust_player_callback(call):
     try:
         _, game_id, player_id = call.data.split('_')
@@ -792,6 +822,7 @@ def handle_adjust_player_callback(call):
 
 # Add callback handler for rebuy, cashout, and clear actions
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('rebuy_', 'cashout_', 'clear_')))
+@safe_handler
 def handle_adjust_action_callback(call):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
