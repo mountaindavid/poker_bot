@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Bot setup
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMINS = [300526718, 7282197423]
+ADMINS = [300526718, ] #7282197423
 bot = telebot.TeleBot(TOKEN)
 db_name = os.getenv("PGDATABASE", "railway")  # Fallback to 'railway' if PGDATABASE not set
 
