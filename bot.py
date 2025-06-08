@@ -1,7 +1,10 @@
 #bot.py
-import telebot, os, random
+import telebot
+import os
+import random
 import psycopg2
 from datetime import datetime
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 load_dotenv()
 import logging
@@ -12,52 +15,65 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMINS = [300526718, 7282197423]
 bot = telebot.TeleBot(TOKEN)
-db_name = os.getenv("PGDATABASE")
+db_name = os.getenv("PGDATABASE", "railway")  # Fallback to 'railway' if PGDATABASE not set
 
 
 def safe_handler(func):
     """safe command handler"""
+
     def wrapper(message):
         try:
             return func(message)
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {e}")
             bot.reply_to(message, f"❌ Error: {str(e)}")
+
     return wrapper
 
 
 # Initialize PostgreSQL database
 def init_db():
     try:
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL environment variable not set")
+
+        # Parse DATABASE_URL
+        result = urlparse(database_url)
+
         # Connect to default 'postgres' database to check/create target database
         conn = psycopg2.connect(
-            host=os.getenv("PGHOST"),
-            port=os.getenv("PGPORT"),
-            user=os.getenv("PGUSER"),
-            password=os.getenv("PGPASSWORD"),
-            database="postgres"  # Use system database
+            host=result.hostname,
+            port=result.port,
+            user=result.username,
+            password=result.password,
+            database="postgres",  # Use system database
+            sslmode="require"  # Railway requires SSL
         )
         conn.set_session(autocommit=True)
         c = conn.cursor()
         logger.info("Checking/creating database")
 
-        # Check if pokerbot_dev exists
-        c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (os.getenv("PGDATABASE"),))
+        # Extract database name from DATABASE_URL or use PGDATABASE
+        target_db = result.path[1:] if result.path else db_name  # Remove leading '/'
+
+        # Check if target database exists
+        c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
         if not c.fetchone():
-            # Create database if it doesn't exist
-            c.execute(f"CREATE DATABASE {os.getenv('PGDATABASE')}")
-            logger.info(f"Database {os.getenv('PGDATABASE')} created")
+            c.execute(f"CREATE DATABASE {target_db}")
+            logger.info(f"Database {target_db} created")
         else:
-            logger.info(f"Database {os.getenv('PGDATABASE')} already exists")
+            logger.info(f"Database {target_db} already exists")
         conn.close()
 
-        # Connect to target database (pokerbot_dev)
+        # Connect to target database
         conn = psycopg2.connect(
-            host=os.getenv("PGHOST"),
-            port=os.getenv("PGPORT"),
-            user=os.getenv("PGUSER"),
-            password=os.getenv("PGPASSWORD"),
-            database=os.getenv("PGDATABASE")
+            host=result.hostname,
+            port=result.port,
+            user=result.username,
+            password=result.password,
+            database=target_db,
+            sslmode="require"
         )
         conn.set_session(autocommit=True)
         c = conn.cursor()
@@ -98,7 +114,7 @@ def init_db():
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
-        raise  # Re-raise to stop bot if initialization fails
+        raise
     finally:
         if 'conn' in locals():
             conn.close()
@@ -106,12 +122,19 @@ def init_db():
 
 def get_db_connection():
     try:
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise ValueError("DATABASE_URL environment variable not set")
+
+        # Parse DATABASE_URL
+        result = urlparse(database_url)
         conn = psycopg2.connect(
-            host=os.getenv("PGHOST"),
-            port=os.getenv("PGPORT"),
-            user=os.getenv("PGUSER"),
-            password=os.getenv("PGPASSWORD"),
-            database=os.getenv("PGDATABASE")
+            host=result.hostname,
+            port=result.port,
+            user=result.username,
+            password=result.password,
+            database=result.path[1:] if result.path else db_name,  # Remove leading '/' or use db_name
+            sslmode="require"
         )
         conn.set_session(autocommit=True)
         return conn
