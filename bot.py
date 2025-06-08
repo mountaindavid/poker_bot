@@ -29,6 +29,29 @@ def safe_handler(func):
 # Initialize PostgreSQL database
 def init_db():
     try:
+        # Connect to default 'postgres' database to check/create target database
+        conn = psycopg2.connect(
+            host=os.getenv("PGHOST"),
+            port=os.getenv("PGPORT"),
+            user=os.getenv("PGUSER"),
+            password=os.getenv("PGPASSWORD"),
+            database="postgres"  # Use system database
+        )
+        conn.set_session(autocommit=True)
+        c = conn.cursor()
+        logger.info("Checking/creating database")
+
+        # Check if pokerbot_dev exists
+        c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (os.getenv("PGDATABASE"),))
+        if not c.fetchone():
+            # Create database if it doesn't exist
+            c.execute(f"CREATE DATABASE {os.getenv('PGDATABASE')}")
+            logger.info(f"Database {os.getenv('PGDATABASE')} created")
+        else:
+            logger.info(f"Database {os.getenv('PGDATABASE')} already exists")
+        conn.close()
+
+        # Connect to target database (pokerbot_dev)
         conn = psycopg2.connect(
             host=os.getenv("PGHOST"),
             port=os.getenv("PGPORT"),
@@ -38,7 +61,7 @@ def init_db():
         )
         conn.set_session(autocommit=True)
         c = conn.cursor()
-        logger.info("Initializing PostgreSQL database")
+        logger.info("Initializing tables in database")
 
         c.execute('''CREATE TABLE IF NOT EXISTS players (
                          id SERIAL PRIMARY KEY,
@@ -75,6 +98,7 @@ def init_db():
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
+        raise  # Re-raise to stop bot if initialization fails
     finally:
         if 'conn' in locals():
             conn.close()
@@ -89,11 +113,12 @@ def get_db_connection():
             password=os.getenv("PGPASSWORD"),
             database=os.getenv("PGDATABASE")
         )
-        conn.set_session(autocommit=True)  # Changed: Enable autocommit for consistency
+        conn.set_session(autocommit=True)
         return conn
     except Exception as e:
         logger.error(f"Error connecting to database: {e}")
         raise
+
 
 
 @bot.message_handler(commands=['menu'])
