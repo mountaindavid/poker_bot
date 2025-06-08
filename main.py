@@ -1,9 +1,9 @@
 #main.py
 from flask import Flask, request
-from bot import bot
 import os
 import telebot
 import logging
+from bot import bot, init_db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +13,12 @@ WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "supersecret")
 
 app = Flask(__name__)
 
+try:
+    init_db()
+    logger.info("Database initialization completed")
+except Exception as e:
+    logger.error(f"Failed to initialize database: {e}")
+    raise
 
 @app.route(f"/{WEBHOOK_SECRET_PATH}", methods=['POST'])
 def webhook():
