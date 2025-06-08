@@ -24,7 +24,7 @@ def index():
 
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 8443))
+    port = int(os.getenv("PORT", 5000))
     bot.remove_webhook()
     bot.set_webhook(url=f'{os.getenv("WEBHOOK_URL")}/{WEBHOOK_SECRET_PATH}')
     app.run(host='0.0.0.0', port=port)
