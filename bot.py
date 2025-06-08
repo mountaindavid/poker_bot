@@ -31,31 +31,66 @@ def safe_handler(func):
     return wrapper
 
 
-# Initialize PostgreSQL database
+def get_db_connection(database="pokerbot_dev"):
+    try:
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            # Parse DATABASE_URL for Railway or local
+            result = urlparse(database_url)
+            conn = psycopg2.connect(
+                host=result.hostname,
+                port=result.port,
+                user=result.username,
+                password=result.password,
+                database=result.path[1:] if result.path else database,
+                sslmode="require" if "railway" in result.hostname else "disable"  # Disable SSL locally
+            )
+        else:
+            # Fallback to individual environment variables for local
+            conn = psycopg2.connect(
+                host=os.getenv("PGHOST", "localhost"),
+                port=os.getenv("PGPORT", "5432"),
+                user=os.getenv("PGUSER", "postgres"),
+                password=os.getenv("PGPASSWORD", "0000"),
+                database=database,
+                sslmode="disable"  # Explicitly disable SSL for local
+            )
+        conn.set_session(autocommit=True)
+        return conn
+    except Exception as e:
+        logger.error(f"Error connecting to database: {e}")
+        raise
+
 def init_db():
     try:
         database_url = os.getenv("DATABASE_URL")
-        if not database_url:
-            raise ValueError("DATABASE_URL environment variable not set")
+        if database_url:
+            # Parse DATABASE_URL for Railway or local
+            result = urlparse(database_url)
+            conn = psycopg2.connect(
+                host=result.hostname,
+                port=result.port,
+                user=result.username,
+                password=result.password,
+                database="postgres",
+                sslmode="require" if "railway" in result.hostname else "disable"  # Disable SSL locally
+            )
+            target_db = result.path[1:] if result.path else db_name
+        else:
+            # Fallback to individual environment variables for local
+            conn = psycopg2.connect(
+                host=os.getenv("PGHOST", "localhost"),
+                port=os.getenv("PGPORT", "5432"),
+                user=os.getenv("PGUSER", "postgres"),
+                password=os.getenv("PGPASSWORD", "0000"),
+                database="postgres",
+                sslmode="disable"  # Disable SSL for local
+            )
+            target_db = os.getenv("PGDATABASE", "pokerbot_dev")
 
-        # Parse DATABASE_URL
-        result = urlparse(database_url)
-
-        # Connect to default 'postgres' database to check/create target database
-        conn = psycopg2.connect(
-            host=result.hostname,
-            port=result.port,
-            user=result.username,
-            password=result.password,
-            database="postgres",  # Use system database
-            sslmode="require"  # Railway requires SSL
-        )
         conn.set_session(autocommit=True)
         c = conn.cursor()
         logger.info("Checking/creating database")
-
-        # Extract database name from DATABASE_URL or use PGDATABASE
-        target_db = result.path[1:] if result.path else db_name  # Remove leading '/'
 
         # Check if target database exists
         c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
@@ -67,14 +102,24 @@ def init_db():
         conn.close()
 
         # Connect to target database
-        conn = psycopg2.connect(
-            host=result.hostname,
-            port=result.port,
-            user=result.username,
-            password=result.password,
-            database=target_db,
-            sslmode="require"
-        )
+        if database_url:
+            conn = psycopg2.connect(
+                host=result.hostname,
+                port=result.port,
+                user=result.username,
+                password=result.password,
+                database=target_db,
+                sslmode="require" if "railway" in result.hostname else "disable"
+            )
+        else:
+            conn = psycopg2.connect(
+                host=os.getenv("PGHOST", "localhost"),
+                port=os.getenv("PGPORT", "5432"),
+                user=os.getenv("PGUSER", "postgres"),
+                password=os.getenv("PGPASSWORD", "0000"),
+                database=target_db,
+                sslmode="disable"
+            )
         conn.set_session(autocommit=True)
         c = conn.cursor()
         logger.info("Initializing tables in database")
