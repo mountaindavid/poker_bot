@@ -110,6 +110,13 @@ def init_db():
                      game_id INTEGER,
                      FOREIGN KEY(player_id) REFERENCES players(id),
                      FOREIGN KEY(game_id) REFERENCES games(id))''')
+        c.execute('''CREATE TABLE IF NOT EXISTS settings (
+                     id SERIAL PRIMARY KEY,
+                     setting_name TEXT UNIQUE,
+                     setting_value BOOLEAN)''')
+        c.execute(
+            "INSERT INTO settings (setting_name, setting_value) VALUES (%s, %s) ON CONFLICT (setting_name) DO NOTHING",
+            ('allow_new_game', False))
 
         logger.info("Database initialized successfully")
     except Exception as e:
@@ -167,6 +174,7 @@ Admin commands:
 /avg_profit — Show average profit per game
 /remove_player — Remove a player from the current game
 /adjust — Adjust buy-in, rebuy, cashout, or clear for a player
+/allow_new_game - Any player can create a new game
     """
     bot.reply_to(message, admin_commands)
 
@@ -192,19 +200,39 @@ def register(message):
 @bot.message_handler(commands=['new_game'])
 @safe_handler
 def new_game(message):
-    if message.from_user.id not in ADMINS:
-        bot.reply_to(message, "Please wait for an admin.")
-        return
+    user_id = message.from_user.id
     conn = get_db_connection()
     c = conn.cursor()
+
+    # Check if user is registered
+    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
+    if not c.fetchone():
+        bot.reply_to(message, "❌ You are not registered. Use /start.")
+        conn.close()
+        return
+
+    # Check allow_new_game setting
+    c.execute("SELECT setting_value FROM settings WHERE setting_name = %s", ('allow_new_game',))
+    allow_new_game = c.fetchone()
+    allow_new_game = allow_new_game[0] if allow_new_game else False
+
+    # If setting is False, only allow admins to create games
+    if not allow_new_game and user_id not in ADMINS:
+        bot.reply_to(message, "❌ Temporary unavailable.")
+        conn.close()
+        return
+
+    # Check for active game
     c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     active_game = c.fetchone()
-    conn.close()
     if active_game:
         bot.reply_to(message, f"❌ Game #{active_game[0]} is already active. End it first with /end_game.")
+        conn.close()
         return
+
     bot.reply_to(message, "Enter a 4-digit password for the game:")
     bot.register_next_step_handler(message, process_game_password)
+    conn.close()
 
 # End game
 @bot.message_handler(commands=['end_game'])
@@ -987,6 +1015,24 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
     finally:
         if 'conn' in locals():
             conn.close()
+
+@bot.message_handler(commands=['allow_new_game'])
+@safe_handler
+def allow_new_game(message):
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT setting_value FROM settings WHERE setting_name = %s", ('allow_new_game',))
+    current_setting = c.fetchone()
+    current_setting = current_setting[0] if current_setting else False
+    new_setting = not current_setting
+    c.execute("UPDATE settings SET setting_value = %s WHERE setting_name = %s", (new_setting, 'allow_new_game'))
+    conn.commit()
+    status = "enabled" if new_setting else "disabled"
+    bot.reply_to(message, f"✅ Creating new games for all registered players is now {status}.")
+    conn.close()
 
 
 # Start bot
