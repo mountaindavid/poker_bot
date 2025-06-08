@@ -172,29 +172,6 @@ def init_db():
             conn.close()
 
 
-def get_db_connection():
-    try:
-        database_url = os.getenv("DATABASE_URL")
-        if not database_url:
-            raise ValueError("DATABASE_URL environment variable not set")
-
-        # Parse DATABASE_URL
-        result = urlparse(database_url)
-        conn = psycopg2.connect(
-            host=result.hostname,
-            port=result.port,
-            user=result.username,
-            password=result.password,
-            database=result.path[1:] if result.path else db_name,  # Remove leading '/' or use db_name
-            sslmode="require"
-        )
-        conn.set_session(autocommit=True)
-        return conn
-    except Exception as e:
-        logger.error(f"Error connecting to database: {e}")
-        raise
-
-
 
 @bot.message_handler(commands=['menu'])
 @safe_handler
