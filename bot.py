@@ -4,6 +4,9 @@ import sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Bot setup
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -14,50 +17,75 @@ db_name = "poker.db"
 
 
 def safe_handler(func):
-    """Декоратор для безопасной обработки команд"""
+    """safe command handler"""
     def wrapper(message):
         try:
             return func(message)
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {e}")
-            bot.reply_to(message, f"❌ Произошла ошибка: {str(e)}")
+            bot.reply_to(message, f"❌ Error: {str(e)}")
     return wrapper
 
 
 # Initialize SQLite database
 def init_db():
-    conn = sqlite3.connect(db_name)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS players (
+    try:
+        # Для Railway используем абсолютный путь
+        db_path = os.path.join(os.getcwd(), db_name)
+        logger.info(f"Initializing database at: {db_path}")
+
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+
+        # Создание таблиц...
+        c.execute('''CREATE TABLE IF NOT EXISTS players (
+                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                         telegram_id INTEGER UNIQUE,
+                         name TEXT,
+                         total_buyin REAL DEFAULT 0.0,
+                         total_cashout REAL DEFAULT 0.0,
+                         registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                         games_played INTEGER DEFAULT 0)''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS games (
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     telegram_id INTEGER UNIQUE,
-                     name TEXT,
-                     total_buyin REAL DEFAULT 0.0,  -- Changed from INTEGER to REAL
-                     total_cashout REAL DEFAULT 0.0,  -- Changed from INTEGER to REAL
-                     registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                     games_played INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS games (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 date TEXT,
-                 is_active INTEGER DEFAULT 1,
-                 password TEXT,
-                 creator_id INTEGER)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 player_id INTEGER,
-                 game_id INTEGER,
-                 amount REAL,
-                 type TEXT,
-                 FOREIGN KEY(player_id) REFERENCES players(id),
-                 FOREIGN KEY(game_id) REFERENCES games(id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS game_players (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 player_id INTEGER,
-                 game_id INTEGER,
-                 FOREIGN KEY(player_id) REFERENCES players(id),
-                 FOREIGN KEY(game_id) REFERENCES games(id))''')
-    conn.commit()
-    conn.close()
+                     date TEXT,
+                     is_active INTEGER DEFAULT 1,
+                     password TEXT,
+                     creator_id INTEGER)''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS transactions (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     player_id INTEGER,
+                     game_id INTEGER,
+                     amount REAL,
+                     type TEXT,
+                     FOREIGN KEY(player_id) REFERENCES players(id),
+                     FOREIGN KEY(game_id) REFERENCES games(id))''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS game_players (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     player_id INTEGER,
+                     game_id INTEGER,
+                     FOREIGN KEY(player_id) REFERENCES players(id),
+                     FOREIGN KEY(game_id) REFERENCES games(id))''')
+
+        conn.commit()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def get_db_connection():
+    try:
+        db_path = os.path.join(os.getcwd(), db_name)
+        return sqlite3.connect(db_path)
+    except Exception as e:
+        logger.error(f"Error connecting to database: {e}")
+        raise
 
 
 @bot.message_handler(commands=['menu'])
