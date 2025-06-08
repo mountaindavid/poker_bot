@@ -1,6 +1,6 @@
 #bot.py
 import telebot, os, random
-import sqlite3
+import psycopg2
 from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
@@ -12,8 +12,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMINS = [300526718, 7282197423]
 bot = telebot.TeleBot(TOKEN)
-db_name = "poker.db"
-
+db_name = os.getenv("PGDATABASE")
 
 
 def safe_handler(func):
@@ -27,50 +26,52 @@ def safe_handler(func):
     return wrapper
 
 
-# Initialize SQLite database
+# Initialize PostgreSQL database
 def init_db():
     try:
-        # Для Railway используем абсолютный путь
-        db_path = os.path.join(os.getcwd(), db_name)
-        logger.info(f"Initializing database at: {db_path}")
-
-        conn = sqlite3.connect(db_path)
+        conn = psycopg2.connect(
+            host=os.getenv("PGHOST"),
+            port=os.getenv("PGPORT"),
+            user=os.getenv("PGUSER"),
+            password=os.getenv("PGPASSWORD"),
+            database=os.getenv("PGDATABASE")
+        )
+        conn.set_session(autocommit=True)
         c = conn.cursor()
+        logger.info("Initializing PostgreSQL database")
 
-        # Создание таблиц...
         c.execute('''CREATE TABLE IF NOT EXISTS players (
-                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                         telegram_id INTEGER UNIQUE,
+                         id SERIAL PRIMARY KEY,
+                         telegram_id BIGINT UNIQUE,
                          name TEXT,
-                         total_buyin REAL DEFAULT 0.0,
-                         total_cashout REAL DEFAULT 0.0,
-                         registered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                         total_buyin DOUBLE PRECISION DEFAULT 0.0,
+                         total_cashout DOUBLE PRECISION DEFAULT 0.0,
+                         registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                          games_played INTEGER DEFAULT 0)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS games (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     date TEXT,
-                     is_active INTEGER DEFAULT 1,
+                     id SERIAL PRIMARY KEY,
+                     date TIMESTAMP,
+                     is_active BOOLEAN DEFAULT TRUE,
                      password TEXT,
-                     creator_id INTEGER)''')
+                     creator_id BIGINT)''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     id SERIAL PRIMARY KEY,
                      player_id INTEGER,
                      game_id INTEGER,
-                     amount REAL,
+                     amount DOUBLE PRECISION,
                      type TEXT,
                      FOREIGN KEY(player_id) REFERENCES players(id),
                      FOREIGN KEY(game_id) REFERENCES games(id))''')
 
         c.execute('''CREATE TABLE IF NOT EXISTS game_players (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     id SERIAL PRIMARY KEY,
                      player_id INTEGER,
                      game_id INTEGER,
                      FOREIGN KEY(player_id) REFERENCES players(id),
                      FOREIGN KEY(game_id) REFERENCES games(id))''')
 
-        conn.commit()
         logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
@@ -81,8 +82,15 @@ def init_db():
 
 def get_db_connection():
     try:
-        db_path = os.path.join(os.getcwd(), db_name)
-        return sqlite3.connect(db_path)
+        conn = psycopg2.connect(
+            host=os.getenv("PGHOST"),
+            port=os.getenv("PGPORT"),
+            user=os.getenv("PGUSER"),
+            password=os.getenv("PGPASSWORD"),
+            database=os.getenv("PGDATABASE")
+        )
+        conn.set_session(autocommit=True)  # Changed: Enable autocommit for consistency
+        return conn
     except Exception as e:
         logger.error(f"Error connecting to database: {e}")
         raise
@@ -121,9 +129,9 @@ Admin commands:
 def register(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO players (telegram_id, name) VALUES (?, ?)", (user_id, name))
+    c.execute("INSERT INTO players (telegram_id, name) VALUES (%s, %s) ON CONFLICT (telegram_id) DO NOTHING", (user_id, name))
     conn.commit()
     conn.close()
     bot.reply_to(message,
@@ -139,9 +147,9 @@ def new_game(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "Please wait for an admin.")
         return
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     active_game = c.fetchone()
     conn.close()
     if active_game:
@@ -155,10 +163,11 @@ def new_game(message):
 @safe_handler
 def end_game(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
     # Get active game ID and creator info
-    c.execute("SELECT g.id, g.creator_id, p.name FROM games g JOIN players p ON g.creator_id = p.telegram_id WHERE g.is_active = 1 ORDER BY g.id DESC LIMIT 1")
+    c.execute(
+        "SELECT g.id, g.creator_id, p.name FROM games g JOIN players p ON g.creator_id = p.telegram_id WHERE g.is_active = TRUE ORDER BY g.id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
@@ -170,7 +179,7 @@ def end_game(message):
         conn.close()
         return
     # End game
-    c.execute("UPDATE games SET is_active = 0 WHERE is_active = 1")
+    c.execute("UPDATE games SET is_active = FALSE WHERE is_active = TRUE")
     conn.commit()
     bot.reply_to(message, f"Game #{game_id} ended.")
     conn.close()
@@ -180,11 +189,11 @@ def process_game_password(message):
         password = message.text.strip()
         if not (password.isdigit() and len(password) == 4):
             raise ValueError("Password must be 4 digits. /new_game")
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT INTO games (date, is_active, password, creator_id) VALUES (?, 1, ?, ?)",
+        c.execute("INSERT INTO games (date, is_active, password, creator_id) VALUES (%s, TRUE, %s, %s) RETURNING id",
                   (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), password, message.from_user.id))
-        game_id = c.lastrowid
+        game_id = c.fetchone()[0]
         conn.commit()
         bot.reply_to(message, f"Game #{game_id} created with password {password}!")
         conn.close()
@@ -197,11 +206,11 @@ def process_game_password(message):
 def join_game(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     c = conn.cursor()
     # Check if player is registered
-    c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
     player = c.fetchone()
     if not player:
         bot.reply_to(message, "❌ You are not registered. Use /start.")
@@ -209,7 +218,7 @@ def join_game(message):
         return
     player_id = player[0]
     # Check active game
-    c.execute("SELECT id, password FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id, password FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
@@ -228,9 +237,9 @@ def process_join_password(message, game_id, correct_password, player_id, name):
         if password != correct_password:
             bot.reply_to(message, "❌ Incorrect password. Try to /join again")
             return
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         if c.fetchone():
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
             conn.close()
@@ -253,11 +262,11 @@ def process_buyin(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
 
         # Get the ID of the currently active game
-        c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
         row = c.fetchone()
         if not row:
             bot.reply_to(message, "❌ No active game found.")
@@ -266,7 +275,7 @@ def process_buyin(message):
         game_id = row[0]
 
         # Check if the player is registered
-        c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
         player = c.fetchone()
         if not player:
             bot.reply_to(message, "❌ You are not registered. Use /start.")
@@ -275,22 +284,22 @@ def process_buyin(message):
         player_id = player[0]
 
         # Check if already joined
-        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         if c.fetchone():
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
             conn.close()
             return
 
         # Add player to game and increment games_played
-        c.execute("INSERT INTO game_players (player_id, game_id) VALUES (?, ?)", (player_id, game_id))
-        c.execute("UPDATE players SET games_played = games_played + 1 WHERE id = ?", (player_id,))
+        c.execute("INSERT INTO game_players (player_id, game_id) VALUES (%s, %s)", (player_id, game_id))
+        c.execute("UPDATE players SET games_played = games_played + 1 WHERE id = %s", (player_id,))
 
         # Save the buy-in transaction (amount is negative)
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, -amount, 'buyin'))
 
         # Update total buy-in
-        c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
+        c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount:.1f}{suits}.")
@@ -308,11 +317,11 @@ def process_buyin(message):
 def rebuy(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
 
     # Check active game
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
@@ -321,16 +330,16 @@ def rebuy(message):
     game_id = game[0]
 
     # Check if player is registered
-    c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
     player = c.fetchone()
     if not player:
-        bot.reply_to(message, "❌ You are not registered. Use /register.")
+        bot.reply_to(message, "❌ You are not registered. Use /start.")
         conn.close()
         return
     player_id = player[0]
 
     # Check if player joined the active game
-    c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+    c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
     if not c.fetchone():
         bot.reply_to(message, "You should join to the current game")
         conn.close()
@@ -349,11 +358,11 @@ def process_rebuy(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
 
         # Get active game
-        c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
         row = c.fetchone()
         if not row:
             bot.reply_to(message, "❌ No active game found.")
@@ -362,7 +371,7 @@ def process_rebuy(message):
         game_id = row[0]
 
         # Check player registration
-        c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
         player = c.fetchone()
         if not player:
             bot.reply_to(message, "❌ You are not registered. Use /start.")
@@ -371,11 +380,11 @@ def process_rebuy(message):
         player_id = player[0]
 
         # Insert rebuy record
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, -amount, 'rebuy'))
 
         # Update total buy-in
-        c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
+        c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} made a rebuy of {amount:.1f}{suits} in game #{game_id}.")
@@ -393,11 +402,11 @@ def process_rebuy(message):
 def cashout(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
 
     # Check active game
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game session.")
@@ -406,7 +415,7 @@ def cashout(message):
     game_id = game[0]
 
     # Check if player is registered
-    c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
     player = c.fetchone()
     if not player:
         bot.reply_to(message, "❌ You are not registered. Use /start.")
@@ -415,7 +424,7 @@ def cashout(message):
     player_id = player[0]
 
     # Check if player joined the active game
-    c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+    c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
     if not c.fetchone():
         bot.reply_to(message, "You should join to the current game")
         conn.close()
@@ -434,11 +443,11 @@ def process_cashout(message):
         user_id = message.from_user.id
         name = message.from_user.first_name
 
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
 
         # Find active game
-        c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
         row = c.fetchone()
         if not row:
             bot.reply_to(message, "❌ No active game session.")
@@ -447,7 +456,7 @@ def process_cashout(message):
         game_id = row[0]
 
         # Get player ID
-        c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
         player = c.fetchone()
         if not player:
             bot.reply_to(message, "❌ You are not registered. Use /start.")
@@ -456,11 +465,11 @@ def process_cashout(message):
         player_id = player[0]
 
         # Save cashout
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, amount, 'cashout'))
 
         # Update total cashout
-        c.execute("UPDATE players SET total_cashout = total_cashout + ? WHERE id = ?", (amount, player_id))
+        c.execute("UPDATE players SET total_cashout = total_cashout + %s WHERE id = %s", (amount, player_id))
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} cashed out {amount:.1f}{suits} in game #{game_id}.")
@@ -476,28 +485,28 @@ def process_cashout(message):
 def reset(message):
     user_id = message.from_user.id
     name = message.from_user.first_name
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
     game_id = game[0]
-    c.execute("SELECT id FROM players WHERE telegram_id = ?", (user_id,))
+    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
     player = c.fetchone()
     if not player:
         bot.reply_to(message, "❌ You are not registered. Use /start.")
         conn.close()
         return
     player_id = player[0]
-    c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+    c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
     if not c.fetchone():
         bot.reply_to(message, "❌ You are not in the current game.")
         conn.close()
         return
-    c.execute("SELECT password FROM games WHERE id = ?", (game_id,))
+    c.execute("SELECT password FROM games WHERE id = %s", (game_id,))
     password = c.fetchone()[0]
     bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
     bot.register_next_step_handler(message, lambda m: process_reset_password(m, game_id, password, player_id, name))
@@ -510,18 +519,18 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         if password != correct_password:
             bot.reply_to(message, "❌ Incorrect password. Try /reset again.")
             return
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT amount, type FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         transactions = c.fetchall()
         for amount, trans_type in transactions:
             if trans_type in ['buyin', 'rebuy']:
-                c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+                c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
             elif trans_type == 'cashout':
-                c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
-        c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-        c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
+        c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+        c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
         conn.commit()
         bot.reply_to(message, f"✅ {name}'s transactions and participation in game #{game_id} have been reset{suits}.")
     except Exception as e:
@@ -538,11 +547,11 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
 @safe_handler
 def game_results(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
 
     # search active game
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
     conn.close()
 
@@ -564,7 +573,7 @@ def process_game_results(message):
         bot.reply_to(message, "❌ Try to see /game_results again with correct game ID.")
 
 def send_game_results_to_user(game_id, chat_id):
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
         SELECT p.name, 
@@ -574,7 +583,7 @@ def send_game_results_to_user(game_id, chat_id):
                SUM(t.amount) as total
         FROM transactions t
         JOIN players p ON t.player_id = p.id
-        WHERE t.game_id = ?
+        WHERE t.game_id = %s
         GROUP BY p.id
     """, (game_id,))
     results = c.fetchall()
@@ -617,7 +626,7 @@ def send_game_results_to_user(game_id, chat_id):
 @bot.message_handler(commands=['overall_results'])
 @safe_handler
 def overall_results(message):
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
                 SELECT p.name, 
@@ -664,7 +673,7 @@ def overall_results(message):
 @bot.message_handler(commands=['avg_profit'])
 @safe_handler
 def avg_profit(message):
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
         SELECT p.name, AVG(s.total)
@@ -692,7 +701,7 @@ def check_db(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "Access denied!")
         return
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT * FROM players")
     players = c.fetchall()
@@ -723,16 +732,16 @@ def remove_player(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
         return
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
     game_id = game[0]
-    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = ?", (game_id,))
+    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = %s", (game_id,))
     players = c.fetchall()
     if not players:
         bot.reply_to(message, "❌ No players in the current game.")
@@ -754,30 +763,30 @@ def handle_remove_player_callback(call):
         _, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        c.execute("SELECT name FROM players WHERE id = %s", (player_id,))
         player = c.fetchone()
         if not player:
             bot.answer_callback_query(call.id, "Invalid player ID.")
             conn.close()
             return
         name = player[0]
-        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         if not c.fetchone():
             bot.answer_callback_query(call.id, f"{name} is not in game #{game_id}.")
             conn.close()
             return
-        c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT amount, type FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         transactions = c.fetchall()
         for amount, trans_type in transactions:
             if trans_type in ['buyin', 'rebuy']:
-                c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+                c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
             elif trans_type == 'cashout':
-                c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
-        c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-        c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
+        c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+        c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+        c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
         conn.commit()
         bot.answer_callback_query(call.id, f"{name} removed from game #{game_id}{suits}.")
         bot.edit_message_text(f"✅ {name} removed from game #{game_id}{suits}.", call.message.chat.id, call.message.message_id)
@@ -796,16 +805,16 @@ def adjust(message):
     if message.from_user.id not in ADMINS:
         bot.reply_to(message, "❌ Access denied! Admins only.")
         return
-    conn = sqlite3.connect(db_name)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT id FROM games WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
         bot.reply_to(message, "❌ No active game found.")
         conn.close()
         return
     game_id = game[0]
-    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = ?", (game_id,))
+    c.execute("SELECT p.id, p.name FROM players p JOIN game_players gp ON p.id = gp.player_id WHERE gp.game_id = %s", (game_id,))
     players = c.fetchall()
     if not players:
         bot.reply_to(message, "❌ No players in the current game.")
@@ -825,9 +834,9 @@ def handle_adjust_player_callback(call):
         _, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        c.execute("SELECT name FROM players WHERE id = %s", (player_id,))
         player = c.fetchone()
         if not player:
             bot.answer_callback_query(call.id, "Invalid player ID.")
@@ -857,31 +866,31 @@ def handle_adjust_action_callback(call):
         action, game_id, player_id = call.data.split('_')
         game_id = int(game_id)
         player_id = int(player_id)
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT name FROM players WHERE id = ?", (player_id,))
+        c.execute("SELECT name FROM players WHERE id = %s", (player_id,))
         player = c.fetchone()
         if not player:
             bot.answer_callback_query(call.id, "Invalid player ID.")
             conn.close()
             return
         name = player[0]
-        c.execute("SELECT id FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+        c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         if not c.fetchone():
             bot.answer_callback_query(call.id, f"{name} is not in game #{game_id}.")
             conn.close()
             return
         if action == 'clear':
-            c.execute("SELECT amount, type FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
+            c.execute("SELECT amount, type FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
             transactions = c.fetchall()
             for amount, trans_type in transactions:
                 if trans_type in ['buyin', 'rebuy']:
-                    c.execute("UPDATE players SET total_buyin = total_buyin - ? WHERE id = ?", (-amount, player_id))
+                    c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
                 elif trans_type == 'cashout':
-                    c.execute("UPDATE players SET total_cashout = total_cashout - ? WHERE id = ?", (amount, player_id))
-            c.execute("DELETE FROM transactions WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-            c.execute("DELETE FROM game_players WHERE player_id = ? AND game_id = ?", (player_id, game_id))
-            c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = ?", (player_id,))
+                    c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
+            c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+            c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
+            c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
             conn.commit()
             bot.answer_callback_query(call.id, f"{name}'s transactions cleared in game #{game_id}{suits}.")
             bot.edit_message_text(f"✅ {name}'s transactions and participation in game #{game_id} cleared{suits}.", call.message.chat.id, call.message.message_id)
@@ -903,25 +912,25 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
         amount = float(message.text.strip())
         if not (amount > 0 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
-        conn = sqlite3.connect(db_name)
+        conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id FROM games WHERE id = ? AND is_active = 1", (game_id,))
+        c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
         if not c.fetchone():
             bot.reply_to(message, "❌ No active game found.")
             conn.close()
             return
-        c.execute("SELECT id FROM players WHERE id = ?", (player_id,))
+        c.execute("SELECT id FROM players WHERE id = %s", (player_id,))
         if not c.fetchone():
             bot.reply_to(message, "❌ Invalid player ID.")
             conn.close()
             return
         amount_value = -amount if action_type == 'rebuy' else amount
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (?, ?, ?, ?)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, amount_value, action_type))
         if action_type == 'rebuy':
-            c.execute("UPDATE players SET total_buyin = total_buyin + ? WHERE id = ?", (amount, player_id))
+            c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
         else:
-            c.execute("UPDATE players SET total_cashout = total_cashout + ? WHERE id = ?", (amount, player_id))
+            c.execute("UPDATE players SET total_cashout = total_cashout + %s WHERE id = %s", (amount, player_id))
         conn.commit()
         bot.reply_to(message, f"✅ {name} {action_type} of {amount:.1f}{suits} in game #{game_id}.")
     except Exception as e:
