@@ -31,146 +31,136 @@ def safe_handler(func):
     return wrapper
 
 
+def _get_connection_params(database="pokerbot_dev"):
+    """Extract connection parameters from DATABASE_URL or environment variables."""
+    database_url = os.getenv("DATABASE_URL")
+
+    if database_url:
+        # Parse DATABASE_URL (Railway/Heroku style)
+        result = urlparse(database_url)
+        return {
+            'host': result.hostname,
+            'port': result.port,
+            'user': result.username,
+            'password': result.password,
+            'database': result.path[1:] if result.path else database,
+            'sslmode': "require" if "railway" in result.hostname else "disable"
+        }
+    else:
+        # Use individual environment variables (local development)
+        return {
+            'host': os.getenv("PGHOST", "localhost"),
+            'port': os.getenv("PGPORT", "5432"),
+            'user': os.getenv("PGUSER", "postgres"),
+            'password': os.getenv("PGPASSWORD", "0000"),
+            'database': database,
+            'sslmode': "disable"
+        }
+
+
 def get_db_connection(database="pokerbot_dev"):
+    """Get a database connection with autocommit enabled."""
     try:
-        database_url = os.getenv("DATABASE_URL")
-        if database_url:
-            # Parse DATABASE_URL for Railway or local
-            result = urlparse(database_url)
-            conn = psycopg2.connect(
-                host=result.hostname,
-                port=result.port,
-                user=result.username,
-                password=result.password,
-                database=result.path[1:] if result.path else database,
-                sslmode="require" if "railway" in result.hostname else "disable"  # Disable SSL locally
-            )
-        else:
-            # Fallback to individual environment variables for local
-            conn = psycopg2.connect(
-                host=os.getenv("PGHOST", "localhost"),
-                port=os.getenv("PGPORT", "5432"),
-                user=os.getenv("PGUSER", "postgres"),
-                password=os.getenv("PGPASSWORD", "0000"),
-                database=database,
-                sslmode="disable"  # Explicitly disable SSL for local
-            )
+        params = _get_connection_params(database)
+        conn = psycopg2.connect(**params)
         conn.set_session(autocommit=True)
         return conn
     except Exception as e:
         logger.error(f"Error connecting to database: {e}")
         raise
 
+
 def init_db():
+    """Initialize database and create required tables."""
     try:
-        database_url = os.getenv("DATABASE_URL")
-        if database_url:
-            # Parse DATABASE_URL for Railway or local
-            result = urlparse(database_url)
-            conn = psycopg2.connect(
-                host=result.hostname,
-                port=result.port,
-                user=result.username,
-                password=result.password,
-                database="postgres",
-                sslmode="require" if "railway" in result.hostname else "disable"  # Disable SSL locally
-            )
-            target_db = result.path[1:] if result.path else db_name
-        else:
-            # Fallback to individual environment variables for local
-            conn = psycopg2.connect(
-                host=os.getenv("PGHOST", "localhost"),
-                port=os.getenv("PGPORT", "5432"),
-                user=os.getenv("PGUSER", "postgres"),
-                password=os.getenv("PGPASSWORD", "0000"),
-                database="postgres",
-                sslmode="disable"  # Disable SSL for local
-            )
-            target_db = os.getenv("PGDATABASE", "pokerbot_dev")
+        # Connect to postgres database to create target database
+        params = _get_connection_params("postgres")
+        target_db = _get_connection_params()['database']
 
-        conn.set_session(autocommit=True)
-        c = conn.cursor()
-        logger.info("Checking/creating database")
+        with psycopg2.connect(**params) as conn:
+            conn.set_session(autocommit=True)
+            with conn.cursor() as cursor:
+                # Create database if it doesn't exist
+                cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
+                if not cursor.fetchone():
+                    cursor.execute(f"CREATE DATABASE {target_db}")
+                    logger.info(f"Database {target_db} created")
+                else:
+                    logger.info(f"Database {target_db} already exists")
 
-        # Check if target database exists
-        c.execute("SELECT 1 FROM pg_database WHERE datname = %s", (target_db,))
-        if not c.fetchone():
-            c.execute(f"CREATE DATABASE {target_db}")
-            logger.info(f"Database {target_db} created")
-        else:
-            logger.info(f"Database {target_db} already exists")
-        conn.close()
+        # Connect to target database and create tables
+        with get_db_connection(target_db) as conn:
+            with conn.cursor() as cursor:
+                logger.info("Creating tables...")
 
-        # Connect to target database
-        if database_url:
-            conn = psycopg2.connect(
-                host=result.hostname,
-                port=result.port,
-                user=result.username,
-                password=result.password,
-                database=target_db,
-                sslmode="require" if "railway" in result.hostname else "disable"
-            )
-        else:
-            conn = psycopg2.connect(
-                host=os.getenv("PGHOST", "localhost"),
-                port=os.getenv("PGPORT", "5432"),
-                user=os.getenv("PGUSER", "postgres"),
-                password=os.getenv("PGPASSWORD", "0000"),
-                database=target_db,
-                sslmode="disable"
-            )
-        conn.set_session(autocommit=True)
-        c = conn.cursor()
-        logger.info("Initializing tables in database")
+                # Create tables with proper constraints
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS players (
+                        id SERIAL PRIMARY KEY,
+                        telegram_id BIGINT UNIQUE NOT NULL,
+                        name TEXT NOT NULL,
+                        total_buyin DOUBLE PRECISION DEFAULT 0.0,
+                        total_cashout DOUBLE PRECISION DEFAULT 0.0,
+                        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        games_played INTEGER DEFAULT 0
+                    )
+                ''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS players (
-                         id SERIAL PRIMARY KEY,
-                         telegram_id BIGINT UNIQUE,
-                         name TEXT,
-                         total_buyin DOUBLE PRECISION DEFAULT 0.0,
-                         total_cashout DOUBLE PRECISION DEFAULT 0.0,
-                         registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                         games_played INTEGER DEFAULT 0)''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS games (
+                        id SERIAL PRIMARY KEY,
+                        date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        is_active BOOLEAN DEFAULT TRUE,
+                        password TEXT,
+                        creator_id BIGINT NOT NULL
+                    )
+                ''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS games (
-                     id SERIAL PRIMARY KEY,
-                     date TIMESTAMP,
-                     is_active BOOLEAN DEFAULT TRUE,
-                     password TEXT,
-                     creator_id BIGINT)''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS transactions (
+                        id SERIAL PRIMARY KEY,
+                        player_id INTEGER NOT NULL,
+                        game_id INTEGER NOT NULL,
+                        amount DOUBLE PRECISION NOT NULL,
+                        type TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(player_id) REFERENCES players(id) ON DELETE CASCADE,
+                        FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE
+                    )
+                ''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-                     id SERIAL PRIMARY KEY,
-                     player_id INTEGER,
-                     game_id INTEGER,
-                     amount DOUBLE PRECISION,
-                     type TEXT,
-                     FOREIGN KEY(player_id) REFERENCES players(id),
-                     FOREIGN KEY(game_id) REFERENCES games(id))''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS game_players (
+                        id SERIAL PRIMARY KEY,
+                        player_id INTEGER NOT NULL,
+                        game_id INTEGER NOT NULL,
+                        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY(player_id) REFERENCES players(id) ON DELETE CASCADE,
+                        FOREIGN KEY(game_id) REFERENCES games(id) ON DELETE CASCADE,
+                        UNIQUE(player_id, game_id)
+                    )
+                ''')
 
-        c.execute('''CREATE TABLE IF NOT EXISTS game_players (
-                     id SERIAL PRIMARY KEY,
-                     player_id INTEGER,
-                     game_id INTEGER,
-                     FOREIGN KEY(player_id) REFERENCES players(id),
-                     FOREIGN KEY(game_id) REFERENCES games(id))''')
-        c.execute('''CREATE TABLE IF NOT EXISTS settings (
-                     id SERIAL PRIMARY KEY,
-                     setting_name TEXT UNIQUE,
-                     setting_value BOOLEAN)''')
-        c.execute(
-            "INSERT INTO settings (setting_name, setting_value) VALUES (%s, %s) ON CONFLICT (setting_name) DO NOTHING",
-            ('allow_new_game', False))
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS settings (
+                        id SERIAL PRIMARY KEY,
+                        setting_name TEXT UNIQUE NOT NULL,
+                        setting_value BOOLEAN NOT NULL DEFAULT FALSE
+                    )
+                ''')
 
-        logger.info("Database initialized successfully")
+                # Insert default settings
+                cursor.execute('''
+                    INSERT INTO settings (setting_name, setting_value) 
+                    VALUES (%s, %s) 
+                    ON CONFLICT (setting_name) DO NOTHING
+                ''', ('allow_new_game', False))
+
+                logger.info("Database initialized successfully")
+
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
 
 
 @bot.message_handler(commands=['menu'])
