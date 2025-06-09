@@ -1262,7 +1262,7 @@ def notifications_switcher(message):
     c.execute("UPDATE settings SET setting_value = %s WHERE setting_name = %s", (new_setting, 'send_notifications'))
     conn.commit()
     status = "enabled" if new_setting else "disabled"
-    bot.reply_to(message, f"✅ Notifications for all registered players are now {status}.")
+    bot.reply_to(message, f"✅ Notifications {status}.")
     conn.close()
     logger.info(f"Admin (Telegram ID: {message.from_user.id}) set notifications to {status}")
 
