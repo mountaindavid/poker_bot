@@ -195,6 +195,8 @@ def show_admin_commands(message):
     /check_db — List all registered players
     /overall_results — Show overall results across all games
     /avg_profit — Show average profit per game
+    
+    /DELETE_DB - Delete everything
     """
     bot.reply_to(message, admin_commands)
 
@@ -1266,7 +1268,47 @@ def notifications_switcher(message):
     conn.close()
     logger.info(f"Admin (Telegram ID: {message.from_user.id}) set notifications to {status}")
 
+# Handler for admin command to delete the database
+@bot.message_handler(commands=['DELETE_DB'])
+@safe_handler
+def delete_db(message):
+    """Initiate database deletion process for admins."""
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    bot.reply_to(message, "Are you sure you want to delete the entire database? Type 'yes' to confirm:")
+    bot.register_next_step_handler(message, process_delete_db_confirmation)
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) initiated database deletion")
 
+def process_delete_db_confirmation(message):
+    """Process confirmation for database deletion."""
+    try:
+        confirmation = message.text.strip().lower()
+        if confirmation != 'yes':
+            bot.reply_to(message, "❌ Database deletion cancelled.")
+            logger.info(f"Admin (Telegram ID: {message.from_user.id}) cancelled database deletion")
+            return
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Drop all tables
+        c.execute("DROP TABLE IF EXISTS transactions CASCADE")
+        c.execute("DROP TABLE IF EXISTS game_players CASCADE")
+        c.execute("DROP TABLE IF EXISTS games CASCADE")
+        c.execute("DROP TABLE IF EXISTS players CASCADE")
+        c.execute("DROP TABLE IF EXISTS settings CASCADE")
+        conn.commit()
+        conn.close()
+        # Reinitialize the database
+        init_db()
+        bot.reply_to(message, "✅ Database cleared and reinitialized.")
+        logger.info(f"Admin (Telegram ID: {message.from_user.id}) cleared and reinitialized the database")
+    except Exception as e:
+        print("Error in database deletion:", e)
+        bot.reply_to(message, "❌ Error clearing database. Try again.")
+        logger.error(f"Error clearing database for admin (Telegram ID: {message.from_user.id}): {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 # Start bot
 if __name__ == '__main__':
