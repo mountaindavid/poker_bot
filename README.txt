@@ -20,3 +20,12 @@
 Суммы пиши с одной цифрой после точки (например, 20.5).
 Если что-то не так, нажми /menu или /start.
 Удачи за столом!
+
+#Download DB from railway
+PGPASSWORD="cYkKaLpSYNEfTwogLZDicHPjdehxpetg" pg_dump \
+  -h crossover.proxy.rlwy.net \
+  -p 14418 \
+  -U postgres \
+  -d railway \
+  -F p \
+  -f railway_dump.sql

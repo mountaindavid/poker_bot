@@ -181,12 +181,14 @@ def help_command(message):
 def show_admin_commands(message):
     admin_commands = """
 Admin commands:
-/check_db — List all registered players
-/overall_results — Show overall results across all games
-/avg_profit — Show average profit per game
 /remove_player — Remove a player from the current game
 /adjust — Adjust buy-in, rebuy, cashout, or clear for a player
 /allow_new_game - Any player can create a new game
+/rename_player - Change player name in DB
+
+/check_db — List all registered players
+/overall_results — Show overall results across all games
+/avg_profit — Show average profit per game
     """
     bot.reply_to(message, admin_commands)
 
@@ -1046,6 +1048,79 @@ def allow_new_game(message):
     bot.reply_to(message, f"✅ Creating new games for all registered players is now {status}.")
     conn.close()
 
+
+# Handler for admin command to rename a player
+@bot.message_handler(commands=['rename_player'])
+@safe_handler
+def rename_player(message):
+    """Initiate player renaming process for admins."""
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM players")
+    players = c.fetchall()
+    if not players:
+        bot.reply_to(message, "❌ No players found.")
+        conn.close()
+        return
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    for player_id, name in players:
+        keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"rename_{player_id}"))
+    bot.reply_to(message, "Select a player to rename:", reply_markup=keyboard)
+    conn.close()
+
+# Callback handler for selecting a player to rename
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rename_'))
+@safe_handler
+def handle_rename_player_callback(call):
+    """Handle player selection for renaming."""
+    try:
+        _, player_id = call.data.split('_')
+        player_id = int(player_id)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT name FROM players WHERE id = %s", (player_id,))
+        player = c.fetchone()
+        if not player:
+            bot.answer_callback_query(call.id, "Invalid player ID.")
+            conn.close()
+            return
+        name = player[0]
+        bot.edit_message_text(f"Enter new name for {name}:", call.message.chat.id, call.message.message_id)
+        bot.register_next_step_handler_by_chat_id(call.message.chat.id, lambda m: process_rename(m, player_id, name))
+    except Exception as e:
+        print("Error in rename player callback:", e)
+        bot.answer_callback_query(call.id, "Error selecting player.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Process the new name for the player
+def process_rename(message, player_id, old_name):
+    """Update player's name in the database."""
+    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
+    try:
+        new_name = message.text.strip()
+        if not new_name:
+            raise ValueError("Name cannot be empty.")
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id FROM players WHERE id = %s", (player_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ Invalid player ID.")
+            conn.close()
+            return
+        c.execute("UPDATE players SET name = %s WHERE id = %s", (new_name, player_id))
+        conn.commit()
+        bot.reply_to(message, f"✅ Player {old_name} renamed to {new_name}{suits}.")
+    except Exception as e:
+        print("Error in rename processing:", e)
+        bot.reply_to(message, "❌ Try again with a valid name.")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 # Start bot
 if __name__ == '__main__':
