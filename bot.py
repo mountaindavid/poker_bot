@@ -155,6 +155,11 @@ def init_db():
                     VALUES (%s, %s) 
                     ON CONFLICT (setting_name) DO NOTHING
                 ''', ('allow_new_game', False))
+                cursor.execute('''
+                    INSERT INTO settings (setting_name, setting_value) 
+                    VALUES (%s, %s) 
+                    ON CONFLICT (setting_name) DO NOTHING
+                ''', ('send_notifications', True))  # Default to True for notifications
 
                 logger.info("Database initialized successfully")
 
@@ -169,7 +174,7 @@ def help_command(message):
     keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
     keyboard.row('/new_game', '/join')
     keyboard.row('/rebuy', '/cashout')
-    keyboard.row('/reset', '/end_game')
+    keyboard.row('/leave', '/end_game')
     keyboard.row('/game_results', '/menu')
 
     bot.send_message(message.chat.id, "🃏 Tap a command to execute:", reply_markup=keyboard)
@@ -180,15 +185,16 @@ def help_command(message):
 @safe_handler
 def show_admin_commands(message):
     admin_commands = """
-Admin commands:
-/remove_player — Remove a player from the current game
-/adjust — Adjust buy-in, rebuy, cashout, or clear for a player
-/allow_new_game - Any player can create a new game
-/rename_player - Change player name in DB
+    Admin commands:
+    /remove_player — Remove a player from the current game
+    /adjust — Adjust buy-in, rebuy, cashout, or clear for a player
+    /allow_new_game - Any player can create a new game
+    /rename_player - Change player name in DB
+    /notifications_switcher - Toggle notifications for all players
 
-/check_db — List all registered players
-/overall_results — Show overall results across all games
-/avg_profit — Show average profit per game
+    /check_db — List all registered players
+    /overall_results — Show overall results across all games
+    /avg_profit — Show average profit per game
     """
     bot.reply_to(message, admin_commands)
 
@@ -208,6 +214,7 @@ def register(message):
                  f"{name}, you are registered!\n\n"
                  f"Push /menu "
                  )
+    logger.info(f"Player {name} (Telegram ID: {user_id}) registered")
 
 
 # New game
@@ -219,11 +226,13 @@ def new_game(message):
     c = conn.cursor()
 
     # Check if user is registered
-    c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
-    if not c.fetchone():
+    c.execute("SELECT id, name FROM players WHERE telegram_id = %s", (user_id,))
+    player = c.fetchone()
+    if not player:
         bot.reply_to(message, "❌ You are not registered. Use /start.")
         conn.close()
         return
+    creator_name = player[1]
 
     # Check allow_new_game setting
     c.execute("SELECT setting_value FROM settings WHERE setting_name = %s", ('allow_new_game',))
@@ -245,8 +254,9 @@ def new_game(message):
         return
 
     bot.reply_to(message, "Enter a 4-digit password for the game:")
-    bot.register_next_step_handler(message, process_game_password)
+    bot.register_next_step_handler(message, lambda m: process_game_password(m, creator_name))
     conn.close()
+    logger.info(f"User {creator_name} (Telegram ID: {user_id}) initiated new game creation")
 
 # End game
 @bot.message_handler(commands=['end_game'])
@@ -272,9 +282,11 @@ def end_game(message):
     c.execute("UPDATE games SET is_active = FALSE WHERE is_active = TRUE")
     conn.commit()
     bot.reply_to(message, f"Game #{game_id} ended.")
+    notify_game_players(game_id, f"🏁 Game #{game_id} has ended by {creator_name}!", exclude_telegram_id=user_id)
     conn.close()
+    logger.info(f"Game #{game_id} ended by {creator_name} (Telegram ID: {user_id})")
 
-def process_game_password(message):
+def process_game_password(message, creator_name):
     try:
         password = message.text.strip()
         if not (password.isdigit() and len(password) == 4):
@@ -286,10 +298,13 @@ def process_game_password(message):
         game_id = c.fetchone()[0]
         conn.commit()
         bot.reply_to(message, f"Game #{game_id} created with password {password}!")
+        notify_all_players_new_game(game_id, creator_name)
         conn.close()
+        logger.info(f"Game #{game_id} created by {creator_name} with password {password}")
     except Exception as e:
         print("Error creating game:", e)
         bot.reply_to(message, "❌ Enter a valid 4-digit password. /new_game")
+        logger.error(f"Error creating game for {creator_name}: {e}")
 
 @bot.message_handler(commands=['join'])
 @safe_handler
@@ -318,6 +333,7 @@ def join_game(message):
     bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
     bot.register_next_step_handler(message, lambda m: process_join_password(m, game_id, password, player_id, name))
     conn.close()
+    logger.info(f"Player {name} (Telegram ID: {user_id}) initiated joining game #{game_id}")
 
 
 def process_join_password(message, game_id, correct_password, player_id, name):
@@ -335,14 +351,16 @@ def process_join_password(message, game_id, correct_password, player_id, name):
             conn.close()
             return
         bot.reply_to(message, f"{suits}{name}, enter buy-in amount (example: 20):")
-        bot.register_next_step_handler(message, process_buyin)
+        bot.register_next_step_handler(message, lambda m: process_buyin(m, name, game_id, player_id))
         conn.close()
+        logger.info(f"Player {name} (ID: {player_id}) passed password check for game #{game_id}")
     except Exception as e:
         print("Error joining game:", e)
         bot.reply_to(message, "❌ Try to /join again.")
+        logger.error(f"Error joining game #{game_id} for {name}: {e}")
 
 
-def process_buyin(message):
+def process_buyin(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount_text = message.text.strip()
@@ -350,7 +368,6 @@ def process_buyin(message):
         if not (amount > 0 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
-        name = message.from_user.first_name
 
         conn = get_db_connection()
         c = conn.cursor()
@@ -393,9 +410,12 @@ def process_buyin(message):
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount:.1f}{suits}.")
+        notify_game_players(game_id, f"👤 {name} joined game #{game_id} with a buy-in of {amount:.1f}{suits}!", exclude_telegram_id=user_id)
+        logger.info(f"Player {name} (ID: {player_id}) joined game #{game_id} with buy-in {amount:.1f}")
     except Exception as e:
         print("Error in buy-in process:", e)
         bot.reply_to(message, "❌ Try to /join again. Example: 20 or 20.5")
+        logger.error(f"Error processing buy-in for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -436,17 +456,17 @@ def rebuy(message):
         return
 
     bot.reply_to(message, "Enter the rebuy amount (example: 50)")
-    bot.register_next_step_handler(message, process_rebuy)
+    bot.register_next_step_handler(message, lambda m: process_rebuy(m, name, game_id, player_id))
     conn.close()
+    logger.info(f"Player {name} (Telegram ID: {user_id}) initiated rebuy for game #{game_id}")
 
-def process_rebuy(message):
+def process_rebuy(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = float(message.text.strip())
         if not (amount > 0 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
-        name = message.from_user.first_name
 
         conn = get_db_connection()
         c = conn.cursor()
@@ -478,9 +498,12 @@ def process_rebuy(message):
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} made a rebuy of {amount:.1f}{suits} in game #{game_id}.")
+        notify_game_players(game_id, f"💸 {name} made a rebuy of {amount:.1f}{suits} in game #{game_id}!", exclude_telegram_id=user_id)
+        logger.info(f"Player {name} (ID: {player_id}) made rebuy of {amount:.1f} in game #{game_id}")
     except Exception as e:
         print("Error in rebuy:", e)
         bot.reply_to(message, "❌ Try to /rebuy again. Example: 20 or 20.5")
+        logger.error(f"Error processing rebuy for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -521,17 +544,17 @@ def cashout(message):
         return
 
     bot.reply_to(message, "Enter cashout amount (example: 11.4)")
-    bot.register_next_step_handler(message, process_cashout)
+    bot.register_next_step_handler(message, lambda m: process_cashout(m, name, game_id, player_id))
     conn.close()
+    logger.info(f"Player {name} (Telegram ID: {user_id}) initiated cashout for game #{game_id}")
 
-def process_cashout(message):
+def process_cashout(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = float(message.text.strip())
         if not (amount > 0 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
-        name = message.from_user.first_name
 
         conn = get_db_connection()
         c = conn.cursor()
@@ -563,14 +586,17 @@ def process_cashout(message):
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} cashed out {amount:.1f}{suits} in game #{game_id}.")
+        notify_game_players(game_id, f"💰 {name} cashed out {amount:.1f}{suits} in game #{game_id}!", exclude_telegram_id=user_id)
+        logger.info(f"Player {name} (ID: {player_id}) cashed out {amount:.1f} in game #{game_id}")
     except Exception as e:
         print("Cashout error:", e)
         bot.reply_to(message, "❌ Try to /cashout again. Example: 20 or 20.5")
+        logger.error(f"Error processing cashout for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
 
-@bot.message_handler(commands=['reset'])
+@bot.message_handler(commands=['leave'])
 @safe_handler
 def reset(message):
     user_id = message.from_user.id
@@ -601,13 +627,14 @@ def reset(message):
     bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
     bot.register_next_step_handler(message, lambda m: process_reset_password(m, game_id, password, player_id, name))
     conn.close()
+    logger.info(f"Player {name} (Telegram ID: {user_id}) initiated leaving for game #{game_id}")
 
 def process_reset_password(message, game_id, correct_password, player_id, name):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         password = message.text.strip()
         if password != correct_password:
-            bot.reply_to(message, "❌ Incorrect password. Try /reset again.")
+            bot.reply_to(message, "❌ Incorrect password. Try to /leave again.")
             return
         conn = get_db_connection()
         c = conn.cursor()
@@ -622,10 +649,13 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
         conn.commit()
-        bot.reply_to(message, f"✅ {name}'s transactions and participation in game #{game_id} have been reset{suits}.")
+        bot.reply_to(message, f"✅ {name} left game #{game_id}{suits}.")
+        notify_game_players(game_id, f"🔄 {name} left game #{game_id}{suits}!", exclude_telegram_id=message.from_user.id)
+        logger.info(f"Player {name} (ID: {player_id}) left from game #{game_id}")
     except Exception as e:
-        print("Error in reset:", e)
-        bot.reply_to(message, "❌ Error resetting. Try /reset again.")
+        print("Error in leaving:", e)
+        bot.reply_to(message, "❌ Error in leaving. Try to /leave again.")
+        logger.error(f"Error leaving player {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -653,14 +683,17 @@ def game_results(message):
         # if no current game - ender previous game ID
         bot.reply_to(message, "⚠️ No active game. Enter the game ID to view past results:")
         bot.register_next_step_handler(message, process_game_results)
+    logger.info(f"User (Telegram ID: {user_id}) requested game results")
 
 def process_game_results(message):
     try:
         game_id = int(message.text.strip())
         send_game_results_to_user(game_id, message.chat.id)
+        logger.info(f"User requested results for game #{game_id}")
     except Exception as e:
         print("Game results error:", e)
         bot.reply_to(message, "❌ Try to see /game_results again with correct game ID.")
+        logger.error(f"Error processing game results for game #{message.text}: {e}")
 
 def send_game_results_to_user(game_id, chat_id):
     conn = get_db_connection()
@@ -757,6 +790,7 @@ def overall_results(message):
         response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {profitable_percent:>5.1f}% ({positive_games}/{total_games})\n"
 
     bot.reply_to(message, response)
+    logger.info(f"User (Telegram ID: {message.from_user.id}) requested overall results")
 
 
 # average profit per game
@@ -781,6 +815,7 @@ def avg_profit(message):
     for name, avg in results:
         response += f"{name}: {'+' if avg > 0 else ''}{avg:.2f}\n"
     bot.reply_to(message, response)
+    logger.info(f"User (Telegram ID: {message.from_user.id}) requested average profit")
 
 
 #ADMINS
@@ -814,6 +849,7 @@ def check_db(message):
             "-----------------------\n"
         )
     bot.reply_to(message, response)
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) checked database")
 
 
 @bot.message_handler(commands=['remove_player'])
@@ -842,8 +878,7 @@ def remove_player(message):
         keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"remove_{game_id}_{player_id}"))
     bot.reply_to(message, f"Select a player to remove from game #{game_id}:", reply_markup=keyboard)
     conn.close()
-
-
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) initiated player removal for game #{game_id}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('remove_'))
 @safe_handler
@@ -880,9 +915,12 @@ def handle_remove_player_callback(call):
         conn.commit()
         bot.answer_callback_query(call.id, f"{name} removed from game #{game_id}{suits}.")
         bot.edit_message_text(f"✅ {name} removed from game #{game_id}{suits}.", call.message.chat.id, call.message.message_id)
+        notify_game_players(game_id, f"🚪 {name} removed from game #{game_id}{suits}!", exclude_telegram_id=None)
+        logger.info(f"Admin removed player {name} (ID: {player_id}) from game #{game_id}")
     except Exception as e:
         print("Error in remove_player callback:", e)
         bot.answer_callback_query(call.id, "Error removing player.")
+        logger.error(f"Error removing player ID {player_id} from game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -915,6 +953,7 @@ def adjust(message):
         keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"adjust_{game_id}_{player_id}"))
     bot.reply_to(message, f"Select a player to adjust in game #{game_id}:", reply_markup=keyboard)
     conn.close()
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) initiated adjustment for game #{game_id}")
 
 # Add callback handler for player selection
 @bot.callback_query_handler(func=lambda call: call.data.startswith('adjust_'))
@@ -940,9 +979,11 @@ def handle_adjust_player_callback(call):
         )
         keyboard.add(telebot.types.InlineKeyboardButton(text="Clear", callback_data=f"clear_{game_id}_{player_id}"))
         bot.edit_message_text(f"Adjust for {name} in game #{game_id}:", call.message.chat.id, call.message.message_id, reply_markup=keyboard)
+        logger.info(f"Admin selected player {name} (ID: {player_id}) for adjustment in game #{game_id}")
     except Exception as e:
         print("Error in adjust player callback:", e)
         bot.answer_callback_query(call.id, "Error selecting player.")
+        logger.error(f"Error selecting player ID {player_id} for adjustment in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -984,13 +1025,17 @@ def handle_adjust_action_callback(call):
             conn.commit()
             bot.answer_callback_query(call.id, f"{name}'s transactions cleared in game #{game_id}{suits}.")
             bot.edit_message_text(f"✅ {name}'s transactions and participation in game #{game_id} cleared{suits}.", call.message.chat.id, call.message.message_id)
+            notify_game_players(game_id, f"🔄 {name} left game #{game_id}{suits}!", exclude_telegram_id=None)
+            logger.info(f"Admin cleared transactions for player {name} (ID: {player_id}) in game #{game_id}")
         else:
             action_type = 'rebuy' if action == 'rebuy' else 'cashout'
             bot.edit_message_text(f"Enter {action_type} amount for {name} in game #{game_id} (example: 20 or 20.5):", call.message.chat.id, call.message.message_id)
             bot.register_next_step_handler_by_chat_id(call.message.chat.id, lambda m: process_adjust_amount(m, game_id, player_id, action_type, name))
+            logger.info(f"Admin initiated {action_type} adjustment for player {name} (ID: {player_id}) in game #{game_id}")
     except Exception as e:
         print(f"Error in {action} callback:", e)
         bot.answer_callback_query(call.id, f"Error processing {action}.")
+        logger.error(f"Error processing {action} for player ID {player_id} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -1023,9 +1068,13 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
             c.execute("UPDATE players SET total_cashout = total_cashout + %s WHERE id = %s", (amount, player_id))
         conn.commit()
         bot.reply_to(message, f"✅ {name} {action_type} of {amount:.1f}{suits} in game #{game_id}.")
+        notification_text = f"💸 {name} rebuy of {amount:.1f}{suits} in game #{game_id}!" if action_type == 'rebuy' else f"💰 {name} cashed out {amount:.1f}{suits} in game #{game_id}!"
+        notify_game_players(game_id, notification_text, exclude_telegram_id=None)
+        logger.info(f"Admin processed {action_type} of {amount:.1f} for player {name} (ID: {player_id}) in game #{game_id}")
     except Exception as e:
         print(f"Error in {action_type} amount processing:", e)
         bot.reply_to(message, f"❌ Try again. Example: 20 or 20.5")
+        logger.error(f"Error processing {action_type} amount for player {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -1047,6 +1096,7 @@ def allow_new_game(message):
     status = "enabled" if new_setting else "disabled"
     bot.reply_to(message, f"✅ Creating new games for all registered players is now {status}.")
     conn.close()
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) set allow_new_game to {status}")
 
 
 # Handler for admin command to rename a player
@@ -1070,6 +1120,7 @@ def rename_player(message):
         keyboard.add(telebot.types.InlineKeyboardButton(text=name, callback_data=f"rename_{player_id}"))
     bot.reply_to(message, "Select a player to rename:", reply_markup=keyboard)
     conn.close()
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) initiated player renaming")
 
 # Callback handler for selecting a player to rename
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rename_'))
@@ -1090,9 +1141,11 @@ def handle_rename_player_callback(call):
         name = player[0]
         bot.edit_message_text(f"Enter new name for {name}:", call.message.chat.id, call.message.message_id)
         bot.register_next_step_handler_by_chat_id(call.message.chat.id, lambda m: process_rename(m, player_id, name))
+        logger.info(f"Admin selected player {name} (ID: {player_id}) for renaming")
     except Exception as e:
         print("Error in rename player callback:", e)
         bot.answer_callback_query(call.id, "Error selecting player.")
+        logger.error(f"Error selecting player ID {player_id} for renaming: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -1115,12 +1168,105 @@ def process_rename(message, player_id, old_name):
         c.execute("UPDATE players SET name = %s WHERE id = %s", (new_name, player_id))
         conn.commit()
         bot.reply_to(message, f"✅ Player {old_name} renamed to {new_name}{suits}.")
+        logger.info(f"Admin renamed player {old_name} (ID: {player_id}) to {new_name}")
     except Exception as e:
         print("Error in rename processing:", e)
         bot.reply_to(message, "❌ Try again with a valid name.")
+        logger.error(f"Error renaming player ID {player_id} from {old_name}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
+
+# Notify all registered players about a new game
+def notify_all_players_new_game(game_id, creator_name):
+    """Send notification to all registered players about new game creation."""
+    if not are_notifications_enabled():
+        logger.info(f"Notifications disabled, skipping new game #{game_id} notification")
+        return
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT telegram_id FROM players")
+        players = c.fetchall()
+        for player in players:
+            telegram_id = player[0]
+            try:
+                bot.send_message(telegram_id, f"🎲 New game #{game_id} has been created by {creator_name}!")
+            except Exception as e:
+                logger.error(f"Failed to notify player {telegram_id} about new game #{game_id}: {e}")
+        logger.info(f"Notified all players about new game #{game_id} created by {creator_name}")
+    except Exception as e:
+        logger.error(f"Error notifying players about new game #{game_id}: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Notify all game participants about an action
+def notify_game_players(game_id, message_text, exclude_telegram_id=None):
+    """Send notification to all players in the specified game, excluding the specified telegram_id if provided."""
+    if not are_notifications_enabled():
+        logger.info(f"Notifications disabled, skipping notification for game #{game_id}: {message_text}")
+        return
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            SELECT p.telegram_id 
+            FROM players p 
+            JOIN game_players gp ON p.id = gp.player_id 
+            WHERE gp.game_id = %s
+        """, (game_id,))
+        players = c.fetchall()
+        for player in players:
+            telegram_id = player[0]
+            if exclude_telegram_id and telegram_id == exclude_telegram_id:
+                continue
+            try:
+                bot.send_message(telegram_id, message_text)
+            except Exception as e:
+                logger.error(f"Failed to notify player {telegram_id} for game #{game_id}: {e}")
+        logger.info(f"Notified game #{game_id} players: {message_text}")
+    except Exception as e:
+        logger.error(f"Error notifying game #{game_id} players: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def are_notifications_enabled():
+    """Check the send_notifications setting in the database."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT setting_value FROM settings WHERE setting_name = %s", ('send_notifications',))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else True  # Default to True if setting not found
+    except Exception as e:
+        logger.error(f"Error checking notifications setting: {e}")
+        return True  # Default to True on error to maintain existing behavior
+
+@bot.message_handler(commands=['notifications_switcher'])
+@safe_handler
+def notifications_switcher(message):
+    """Toggle the send_notifications setting for all registered players."""
+    if message.from_user.id not in ADMINS:
+        bot.reply_to(message, "❌ Access denied! Admins only.")
+        return
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT setting_value FROM settings WHERE setting_name = %s", ('send_notifications',))
+    current_setting = c.fetchone()
+    current_setting = current_setting[0] if current_setting else True
+    new_setting = not current_setting
+    c.execute("UPDATE settings SET setting_value = %s WHERE setting_name = %s", (new_setting, 'send_notifications'))
+    conn.commit()
+    status = "enabled" if new_setting else "disabled"
+    bot.reply_to(message, f"✅ Notifications for all registered players are now {status}.")
+    conn.close()
+    logger.info(f"Admin (Telegram ID: {message.from_user.id}) set notifications to {status}")
+
+
 
 # Start bot
 if __name__ == '__main__':
@@ -1128,4 +1274,3 @@ if __name__ == '__main__':
     if not os.getenv("RAILWAY_ENVIRONMENT"):
         bot.remove_webhook()
         bot.polling()
-
