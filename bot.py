@@ -352,7 +352,7 @@ def process_join_password(message, game_id, correct_password, player_id, name):
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
             conn.close()
             return
-        bot.reply_to(message, f"{suits}{name}, enter buy-in amount (example: 20):")
+        bot.reply_to(message, f"{suits}{name}, enter buy-in amount from 0 to 5000:")
         bot.register_next_step_handler(message, lambda m: process_buyin(m, name, game_id, player_id))
         conn.close()
         logger.info(f"Player {name} (ID: {player_id}) passed password check for game #{game_id}")
@@ -367,7 +367,7 @@ def process_buyin(message, name, game_id, player_id):
     try:
         amount_text = message.text.strip()
         amount = float(amount_text)
-        if not (amount > 0 and round(amount, 1) == amount):
+        if not (amount > 0 and amount < 5000 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
 
@@ -416,7 +416,7 @@ def process_buyin(message, name, game_id, player_id):
         logger.info(f"Player {name} (ID: {player_id}) joined game #{game_id} with buy-in {amount:.1f}")
     except Exception as e:
         print("Error in buy-in process:", e)
-        bot.reply_to(message, "❌ Try to /join again. Example: 20 or 20.5")
+        bot.reply_to(message, "❌ Try to /join again. From 0 to 5000")
         logger.error(f"Error processing buy-in for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
@@ -466,7 +466,7 @@ def process_rebuy(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = float(message.text.strip())
-        if not (amount > 0 and round(amount, 1) == amount):
+        if not (amount > 0 and amount < 5000 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
 
@@ -504,7 +504,7 @@ def process_rebuy(message, name, game_id, player_id):
         logger.info(f"Player {name} (ID: {player_id}) made rebuy of {amount:.1f} in game #{game_id}")
     except Exception as e:
         print("Error in rebuy:", e)
-        bot.reply_to(message, "❌ Try to /rebuy again. Example: 20 or 20.5")
+        bot.reply_to(message, "❌ Try to /rebuy again. From 0 to 5000")
         logger.error(f"Error processing rebuy for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
@@ -554,7 +554,7 @@ def process_cashout(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = float(message.text.strip())
-        if not (amount > 0 and round(amount, 1) == amount):
+        if not (amount > 0 and amount < 5000 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         user_id = message.from_user.id
 
@@ -592,7 +592,7 @@ def process_cashout(message, name, game_id, player_id):
         logger.info(f"Player {name} (ID: {player_id}) cashed out {amount:.1f} in game #{game_id}")
     except Exception as e:
         print("Cashout error:", e)
-        bot.reply_to(message, "❌ Try to /cashout again. Example: 20 or 20.5")
+        bot.reply_to(message, "❌ Try to /cashout again. From 0 to 5000")
         logger.error(f"Error processing cashout for {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
@@ -626,7 +626,7 @@ def reset(message):
         return
     c.execute("SELECT password FROM games WHERE id = %s", (game_id,))
     password = c.fetchone()[0]
-    bot.reply_to(message, f"{name}, enter the 4-digit password for game #{game_id}:")
+    bot.reply_to(message, f"{name}, enter game pass, your data will be deleted in game #{game_id}:")
     bot.register_next_step_handler(message, lambda m: process_reset_password(m, game_id, password, player_id, name))
     conn.close()
     logger.info(f"Player {name} (Telegram ID: {user_id}) initiated leaving for game #{game_id}")
@@ -655,8 +655,8 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         notify_game_players(game_id, f"🔄 {name} left game #{game_id}{suits}!", exclude_telegram_id=message.from_user.id)
         logger.info(f"Player {name} (ID: {player_id}) left from game #{game_id}")
     except Exception as e:
-        print("Error in leaving:", e)
-        bot.reply_to(message, "❌ Error in leaving. Try to /leave again.")
+        print("Error in leaving process:", e)
+        bot.reply_to(message, "❌ Error in leaving process. Try to /leave again.")
         logger.error(f"Error leaving player {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
@@ -683,7 +683,7 @@ def game_results(message):
         send_game_results_to_user(active_game_id, message.chat.id)
     else:
         # if no current game - ender previous game ID
-        bot.reply_to(message, "⚠️ No active game. Enter the game ID to view past results:")
+        bot.reply_to(message, "⚠️ No active game. Enter the game number to view past results:")
         bot.register_next_step_handler(message, process_game_results)
     logger.info(f"User (Telegram ID: {user_id}) requested game results")
 
@@ -1031,7 +1031,7 @@ def handle_adjust_action_callback(call):
             logger.info(f"Admin cleared transactions for player {name} (ID: {player_id}) in game #{game_id}")
         else:
             action_type = 'rebuy' if action == 'rebuy' else 'cashout'
-            bot.edit_message_text(f"Enter {action_type} amount for {name} in game #{game_id} (example: 20 or 20.5):", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(f"Enter {action_type} amount for {name} in game #{game_id} (From 0 to 5000):", call.message.chat.id, call.message.message_id)
             bot.register_next_step_handler_by_chat_id(call.message.chat.id, lambda m: process_adjust_amount(m, game_id, player_id, action_type, name))
             logger.info(f"Admin initiated {action_type} adjustment for player {name} (ID: {player_id}) in game #{game_id}")
     except Exception as e:
@@ -1047,7 +1047,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount = float(message.text.strip())
-        if not (amount > 0 and round(amount, 1) == amount):
+        if not (amount > 0 and amount < 5000 and round(amount, 1) == amount):
             raise ValueError("Amount must be a positive number with up to one decimal place (e.g., 20 or 20.5).")
         conn = get_db_connection()
         c = conn.cursor()
@@ -1075,7 +1075,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
         logger.info(f"Admin processed {action_type} of {amount:.1f} for player {name} (ID: {player_id}) in game #{game_id}")
     except Exception as e:
         print(f"Error in {action_type} amount processing:", e)
-        bot.reply_to(message, f"❌ Try again. Example: 20 or 20.5")
+        bot.reply_to(message, f"❌ Try again. From 0 to 5000")
         logger.error(f"Error processing {action_type} amount for player {name} in game #{game_id}: {e}")
     finally:
         if 'conn' in locals():
