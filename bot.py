@@ -204,7 +204,7 @@ def help_command(message):
     keyboard.row('/new_game', '/join')
     keyboard.row('/rebuy', '/cashout')
     keyboard.row('/leave', '/end_game')
-    keyboard.row('/game_results', '/menu')
+    keyboard.row('/game_results', '/admin')
 
     bot.send_message(message.chat.id, "🃏 Tap a command to execute:", reply_markup=keyboard)
 
@@ -220,7 +220,6 @@ def show_admin_commands(message):
     /rename_player - Change player name in DB
     /notifications_switcher - Toggle notifications for all players
 
-    /check_db — List all registered players
     /overall_results — Show overall results across all games
     /avg_profit — Show average profit per game
 
@@ -687,7 +686,8 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
             elif trans_type == 'rebuy':
                 c.execute("UPDATE players SET total_rebuys = total_rebuys - %s WHERE id = %s", (-amount, player_id))
             elif trans_type == 'cashout':
-                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
+                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s",
+                          (amount, player_id))
         c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
@@ -795,8 +795,10 @@ def send_game_results_to_user(game_id, chat_id):
 def overall_results(message):
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # Get basic player stats with player IDs
     c.execute("""
-                SELECT p.name, 
+                SELECT p.id, p.name, 
                        p.games_played, 
                        CAST(
                            COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)
@@ -812,28 +814,56 @@ def overall_results(message):
                 GROUP BY p.id, p.name, p.games_played
                 ORDER BY p.name
             """)
-    results = c.fetchall()
+    players = c.fetchall()
+    
+    # Get win rates for all players
+    c.execute("""
+        SELECT player_id, 
+               COUNT(DISTINCT game_id) as total_games,
+               COUNT(DISTINCT CASE WHEN game_profit > 0 THEN game_id END) as winning_games
+        FROM (
+            SELECT player_id, game_id,
+                   SUM(CASE WHEN type = 'cashout' THEN amount ELSE 0 END) - 
+                   SUM(CASE WHEN type IN ('buyin', 'rebuy') THEN ABS(amount) ELSE 0 END) as game_profit
+            FROM transactions 
+            GROUP BY player_id, game_id
+        ) game_stats
+        GROUP BY player_id
+    """)
+    win_rates = {row[0]: (row[1], row[2]) for row in c.fetchall()}
+    
     conn.close()
 
-    if not results:
+    if not players:
         bot.reply_to(message, "No player data found.")
         return
 
     # Create table header
     response = "📊 Overall Results:\n"
-    response += f"{'Name':<15} | {'Games':<8} | {'Total $':<10} | {'Buy-ins':<10} | {'Rebuys':<10} | {'Cashouts':<10}\n"
-    response += "-" * 75 + "\n"
+    response += f"{'Name':<15} | {'Games':<8} | {'Total $':<10} | {'Win Rate':<12} | {'Avg/Game':<10}\n"
+    response += "-" * 70 + "\n"
 
     # Fill table rows
-    for name, games_played, total_buyins, total_rebuys, total_cashouts in results:
+    for player_id, name, games_played, total_buyins, total_rebuys, total_cashouts in players:
         # Calculate actual profit from transactions
         actual_profit = total_cashouts - (total_buyins + total_rebuys)
+        
+        # Get win rate
+        win_rate = "N/A"
+        if player_id in win_rates:
+            total_games, winning_games = win_rates[player_id]
+            if total_games > 0:
+                win_rate = f"{winning_games/total_games*100:.0f}%"
+        
+        # Calculate average profit per game
+        avg_profit = actual_profit / games_played if games_played > 0 else 0
         
         # Truncate name to 15 characters
         name = name[:15]
         # Format actual_profit to ensure consistent width
         profit_str = f"{'+' if actual_profit > 0 else ''}{actual_profit:.1f}"
-        response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {total_buyins:<10.1f} | {total_rebuys:<10.1f} | {total_cashouts:<10.1f}\n"
+        avg_str = f"{'+' if avg_profit > 0 else ''}{avg_profit:.1f}"
+        response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {win_rate:<12} | {avg_str:<10}\n"
 
     bot.reply_to(message, response)
     logger.info(f"User (Telegram ID: {message.from_user.id}) requested overall results")
@@ -865,107 +895,6 @@ def avg_profit(message):
 
 
 # ADMINS
-@bot.message_handler(commands=['check_db'])
-@safe_handler
-def check_db(message):
-    suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
-    if message.from_user.id not in ADMINS:
-        bot.reply_to(message, "Access denied!")
-        return
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("""
-        SELECT p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_buyins,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_rebuys,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_cashouts,
-               COUNT(DISTINCT t.game_id) as games_with_transactions
-        FROM players p
-        LEFT JOIN transactions t ON t.player_id = p.id
-        GROUP BY p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played
-        ORDER BY p.id
-    """)
-    players = c.fetchall()
-    
-    # Get win rates for all players in one query
-    c.execute("""
-        SELECT player_id, 
-               COUNT(DISTINCT game_id) as total_games,
-               COUNT(DISTINCT CASE WHEN game_profit > 0 THEN game_id END) as winning_games
-        FROM (
-            SELECT player_id, game_id,
-                   SUM(CASE WHEN type = 'cashout' THEN amount ELSE 0 END) - 
-                   SUM(CASE WHEN type IN ('buyin', 'rebuy') THEN ABS(amount) ELSE 0 END) as game_profit
-            FROM transactions 
-            GROUP BY player_id, game_id
-        ) game_stats
-        GROUP BY player_id
-    """)
-    win_rates = {row[0]: (row[1], row[2]) for row in c.fetchall()}
-    
-    conn.close()
-
-    if not players:
-        bot.reply_to(message, "No players found in the database.")
-        return
-
-    # Split players into chunks to avoid message length limit
-    chunk_size = 5  # Number of players per message
-    player_chunks = [players[i:i + chunk_size] for i in range(0, len(players), chunk_size)]
-    
-    for i, chunk in enumerate(player_chunks):
-        if i == 0:
-            # First message with header
-            response = f"📊 Database Overview {suits}\n"
-            response += "=" * 50 + "\n\n"
-        else:
-            # Subsequent messages
-            response = f"📊 Database Overview {suits} (Part {i+1})\n"
-            response += "=" * 50 + "\n\n"
-        
-        for player in chunk:
-            player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts, games_with_transactions = player
-            
-            # Calculate actual profit from transactions
-            actual_profit = actual_cashouts - (actual_buyins + actual_rebuys)
-            
-            # Get win rate from pre-calculated data
-            win_rate = "N/A"
-            if player_id in win_rates:
-                total_games, winning_games = win_rates[player_id]
-                if total_games > 0:
-                    win_rate = f"{winning_games}/{total_games} ({winning_games/total_games*100:.0f}%)"
-            
-            # Calculate average profit per game
-            avg_profit = actual_profit / games_with_transactions if games_with_transactions > 0 else 0
-            
-            response += (
-                f"🆔 **{player_id}** | 👤 **{name}**\n"
-                f"💰 **Profit:** {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
-                f"💳 **Transactions:** {actual_buyins:.1f} buy-ins | {actual_rebuys:.1f} rebuys | {actual_cashouts:.1f} cashouts\n"
-                f"🎮 **Games:** {games_played} played | {games_with_transactions} with transactions\n"
-                f"📈 **Win Rate:** {win_rate}\n"
-                f"📊 **Avg/Game:** {'+' if avg_profit > 0 else ''}{avg_profit:.1f}\n"
-                "─" * 40 + "\n"
-            )
-        
-        # Add footer for last chunk
-        if i == len(player_chunks) - 1:
-            response += f"\n📋 **Total Players:** {len(players)}"
-        
-        try:
-            bot.reply_to(message, response, parse_mode='Markdown')
-        except Exception as e:
-            # If Markdown fails, send without formatting
-            try:
-                bot.reply_to(message, response)
-            except Exception as e2:
-                logger.error(f"Failed to send check_db message: {e2}")
-                bot.reply_to(message, f"Error sending data: {str(e2)[:100]}")
-    
-    logger.info(f"Admin (Telegram ID: {message.from_user.id}) checked database")
-
-
 @bot.message_handler(commands=['remove_player'])
 @safe_handler
 def remove_player(message):
@@ -1021,10 +950,13 @@ def handle_remove_player_callback(call):
         c.execute("SELECT amount, type FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         transactions = c.fetchall()
         for amount, trans_type in transactions:
-            if trans_type in ['buyin', 'rebuy']:
+            if trans_type == 'buyin':
                 c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
+            elif trans_type == 'rebuy':
+                c.execute("UPDATE players SET total_rebuys = total_rebuys - %s WHERE id = %s", (-amount, player_id))
             elif trans_type == 'cashout':
-                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
+                c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s",
+                          (amount, player_id))
         c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         c.execute("DELETE FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         c.execute("UPDATE players SET games_played = games_played - 1 WHERE id = %s", (player_id,))
@@ -1137,8 +1069,10 @@ def handle_adjust_action_callback(call):
                       (player_id, game_id))
             transactions = c.fetchall()
             for amount, trans_type in transactions:
-                if trans_type in ['buyin', 'rebuy']:
+                if trans_type == 'buyin':
                     c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
+                elif trans_type == 'rebuy':
+                    c.execute("UPDATE players SET total_rebuys = total_rebuys - %s WHERE id = %s", (-amount, player_id))
                 elif trans_type == 'cashout':
                     c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s",
                               (amount, player_id))
@@ -1193,7 +1127,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, amount_value, action_type))
         if action_type == 'rebuy':
-            c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
+            c.execute("UPDATE players SET total_rebuys = total_rebuys + %s WHERE id = %s", (amount, player_id))
         else:
             c.execute("UPDATE players SET total_cashout = total_cashout + %s WHERE id = %s", (amount, player_id))
         conn.commit()
