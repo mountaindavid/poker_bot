@@ -804,10 +804,10 @@ def overall_results(message):
                        SUM(CASE WHEN s.total > 0 THEN 1 ELSE 0 END) as positive_games,
                        COUNT(DISTINCT s.game_id) as total_games,
                        CAST(
-                           COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
+                           COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)
                        ) as total_buyins,
                        CAST(
-                           COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
+                           COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)
                        ) as total_rebuys,
                        CAST(
                            COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
@@ -890,8 +890,8 @@ def check_db(message):
     c = conn.cursor()
     c.execute("""
         SELECT p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_buyins,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_rebuys,
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_buyins,
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_rebuys,
                CAST(COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_cashouts
         FROM players p
         LEFT JOIN transactions t ON t.player_id = p.id
