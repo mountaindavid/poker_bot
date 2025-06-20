@@ -798,9 +798,6 @@ def overall_results(message):
     c.execute("""
                 SELECT p.name, 
                        p.games_played, 
-                       CAST(
-                           p.total_cashout - p.total_buyin AS NUMERIC(10,1)
-                       ) as total_profit,
                        SUM(CASE WHEN s.total > 0 THEN 1 ELSE 0 END) as positive_games,
                        COUNT(DISTINCT s.game_id) as total_games,
                        CAST(
@@ -819,7 +816,8 @@ def overall_results(message):
                     GROUP BY player_id, game_id
                 ) s ON s.player_id = p.id
                 LEFT JOIN transactions t ON t.player_id = p.id
-                GROUP BY p.id, p.name, p.games_played, p.total_buyin, p.total_cashout
+                GROUP BY p.id, p.name, p.games_played
+                ORDER BY p.name
             """)
     results = c.fetchall()
     conn.close()
@@ -834,11 +832,9 @@ def overall_results(message):
     response += "-" * 75 + "\n"
 
     # Fill table rows
-    for name, games_played, total_profit, positive_games, total_games, total_buyins, total_rebuys, total_cashouts in results:
-        total_profit = total_profit or 0  # Handle NULL for players with no transactions
+    for name, games_played, positive_games, total_games, total_buyins, total_rebuys, total_cashouts in results:
         total_games = total_games or 0
         positive_games = positive_games or 0
-        profitable_percent = (positive_games / total_games * 100) if total_games > 0 else 0
         
         # Calculate actual profit from transactions
         actual_profit = total_cashouts - (total_buyins + total_rebuys)
@@ -892,38 +888,67 @@ def check_db(message):
         SELECT p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played,
                CAST(COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_buyins,
                CAST(COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_rebuys,
-               CAST(COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_cashouts
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_cashouts,
+               COUNT(DISTINCT t.game_id) as games_with_transactions
         FROM players p
         LEFT JOIN transactions t ON t.player_id = p.id
         GROUP BY p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played
         ORDER BY p.id
     """)
     players = c.fetchall()
+    
+    # Get win rates for all players in one query
+    c.execute("""
+        SELECT player_id, 
+               COUNT(DISTINCT game_id) as total_games,
+               COUNT(DISTINCT CASE WHEN game_profit > 0 THEN game_id END) as winning_games
+        FROM (
+            SELECT player_id, game_id,
+                   SUM(CASE WHEN type = 'cashout' THEN amount ELSE 0 END) - 
+                   SUM(CASE WHEN type IN ('buyin', 'rebuy') THEN ABS(amount) ELSE 0 END) as game_profit
+            FROM transactions 
+            GROUP BY player_id, game_id
+        ) game_stats
+        GROUP BY player_id
+    """)
+    win_rates = {row[0]: (row[1], row[2]) for row in c.fetchall()}
+    
     conn.close()
 
     if not players:
         bot.reply_to(message, "No players found in the database.")
         return
 
-    response = "Players:\n"
+    response = f"📊 Database Overview {suits}\n"
+    response += "=" * 50 + "\n\n"
+    
     for player in players:
-        player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts = player
+        player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts, games_with_transactions = player
         
         # Calculate actual profit from transactions
         actual_profit = actual_cashouts - (actual_buyins + actual_rebuys)
         
+        # Get win rate from pre-calculated data
+        win_rate = "N/A"
+        if player_id in win_rates:
+            total_games, winning_games = win_rates[player_id]
+            if total_games > 0:
+                win_rate = f"{winning_games}/{total_games} ({winning_games/total_games*100:.0f}%)"
+        
+        # Calculate average profit per game
+        avg_profit = actual_profit / games_with_transactions if games_with_transactions > 0 else 0
+        
         response += (
-            f"🆔 ID: {player_id}\n"
-            f"👤 Name: {name}\n"
-            f"📱 Telegram ID: {telegram_id}\n"
-            f"💰 Total profit (from transactions): {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
-            f"💳 Buy-ins: {actual_buyins:.1f} | Rebuys: {actual_rebuys:.1f} | Cashouts: {actual_cashouts:.1f}\n"
-            f"📊 Legacy profit (from players table): {'+' if (total_cashout - total_buyin) > 0 else ''}{(total_cashout - total_buyin):.1f}\n"
-            f"{suits}Games played: {games_played}\n"
-            f"Registered: {registered_at}\n"
-            "-----------------------\n"
+            f"🆔 **{player_id}** | 👤 **{name}**\n"
+            f"💰 **Profit:** {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
+            f"💳 **Transactions:** {actual_buyins:.1f} buy-ins | {actual_rebuys:.1f} rebuys | {actual_cashouts:.1f} cashouts\n"
+            f"🎮 **Games:** {games_played} played | {games_with_transactions} with transactions\n"
+            f"📈 **Win Rate:** {win_rate}\n"
+            f"📊 **Avg/Game:** {'+' if avg_profit > 0 else ''}{avg_profit:.1f}\n"
+            "─" * 40 + "\n"
         )
-    bot.reply_to(message, response)
+    
+    bot.reply_to(message, response, parse_mode='Markdown')
     logger.info(f"Admin (Telegram ID: {message.from_user.id}) checked database")
 
 
