@@ -718,7 +718,7 @@ def send_game_results_to_user(game_id, chat_id):
                SUM(CASE WHEN t.type = 'buyin' THEN -t.amount ELSE 0 END) as buyins,
                SUM(CASE WHEN t.type = 'rebuy' THEN -t.amount ELSE 0 END) as rebuys,
                SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END) as cashouts,
-               ROUND(SUM(t.amount), 1) as total
+               CAST(SUM(t.amount) AS NUMERIC(10,1)) as total
         FROM transactions t
         JOIN players p ON t.player_id = p.id
         WHERE t.game_id = %s
@@ -769,7 +769,7 @@ def overall_results(message):
     c.execute("""
                 SELECT p.name, 
                        p.games_played, 
-                       ROUND(p.total_cashout - p.total_buyin, 1) as total_profit,
+                       CAST(p.total_cashout - p.total_buyin AS NUMERIC(10,1)) as total_profit,
                        SUM(CASE WHEN s.total > 0 THEN 1 ELSE 0 END) as positive_games,
                        COUNT(DISTINCT s.game_id) as total_games
                 FROM players p
@@ -815,7 +815,7 @@ def avg_profit(message):
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
-        SELECT p.name, ROUND(AVG(s.total), 1)
+        SELECT p.name, CAST(AVG(s.total) AS NUMERIC(10,1))
         FROM (
             SELECT player_id, game_id, SUM(amount) as total
             FROM transactions
