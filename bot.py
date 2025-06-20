@@ -798,8 +798,6 @@ def overall_results(message):
     c.execute("""
                 SELECT p.name, 
                        p.games_played, 
-                       SUM(CASE WHEN s.total > 0 THEN 1 ELSE 0 END) as positive_games,
-                       COUNT(DISTINCT s.game_id) as total_games,
                        CAST(
                            COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN ABS(t.amount) ELSE 0 END), 0) AS NUMERIC(10,1)
                        ) as total_buyins,
@@ -810,11 +808,6 @@ def overall_results(message):
                            COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
                        ) as total_cashouts
                 FROM players p
-                LEFT JOIN (
-                    SELECT player_id, game_id, SUM(amount) as total
-                    FROM transactions
-                    GROUP BY player_id, game_id
-                ) s ON s.player_id = p.id
                 LEFT JOIN transactions t ON t.player_id = p.id
                 GROUP BY p.id, p.name, p.games_played
                 ORDER BY p.name
@@ -832,10 +825,7 @@ def overall_results(message):
     response += "-" * 75 + "\n"
 
     # Fill table rows
-    for name, games_played, positive_games, total_games, total_buyins, total_rebuys, total_cashouts in results:
-        total_games = total_games or 0
-        positive_games = positive_games or 0
-        
+    for name, games_played, total_buyins, total_rebuys, total_cashouts in results:
         # Calculate actual profit from transactions
         actual_profit = total_cashouts - (total_buyins + total_rebuys)
         
@@ -919,36 +909,60 @@ def check_db(message):
         bot.reply_to(message, "No players found in the database.")
         return
 
-    response = f"📊 Database Overview {suits}\n"
-    response += "=" * 50 + "\n\n"
+    # Split players into chunks to avoid message length limit
+    chunk_size = 5  # Number of players per message
+    player_chunks = [players[i:i + chunk_size] for i in range(0, len(players), chunk_size)]
     
-    for player in players:
-        player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts, games_with_transactions = player
+    for i, chunk in enumerate(player_chunks):
+        if i == 0:
+            # First message with header
+            response = f"📊 Database Overview {suits}\n"
+            response += "=" * 50 + "\n\n"
+        else:
+            # Subsequent messages
+            response = f"📊 Database Overview {suits} (Part {i+1})\n"
+            response += "=" * 50 + "\n\n"
         
-        # Calculate actual profit from transactions
-        actual_profit = actual_cashouts - (actual_buyins + actual_rebuys)
+        for player in chunk:
+            player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts, games_with_transactions = player
+            
+            # Calculate actual profit from transactions
+            actual_profit = actual_cashouts - (actual_buyins + actual_rebuys)
+            
+            # Get win rate from pre-calculated data
+            win_rate = "N/A"
+            if player_id in win_rates:
+                total_games, winning_games = win_rates[player_id]
+                if total_games > 0:
+                    win_rate = f"{winning_games}/{total_games} ({winning_games/total_games*100:.0f}%)"
+            
+            # Calculate average profit per game
+            avg_profit = actual_profit / games_with_transactions if games_with_transactions > 0 else 0
+            
+            response += (
+                f"🆔 **{player_id}** | 👤 **{name}**\n"
+                f"💰 **Profit:** {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
+                f"💳 **Transactions:** {actual_buyins:.1f} buy-ins | {actual_rebuys:.1f} rebuys | {actual_cashouts:.1f} cashouts\n"
+                f"🎮 **Games:** {games_played} played | {games_with_transactions} with transactions\n"
+                f"📈 **Win Rate:** {win_rate}\n"
+                f"📊 **Avg/Game:** {'+' if avg_profit > 0 else ''}{avg_profit:.1f}\n"
+                "─" * 40 + "\n"
+            )
         
-        # Get win rate from pre-calculated data
-        win_rate = "N/A"
-        if player_id in win_rates:
-            total_games, winning_games = win_rates[player_id]
-            if total_games > 0:
-                win_rate = f"{winning_games}/{total_games} ({winning_games/total_games*100:.0f}%)"
+        # Add footer for last chunk
+        if i == len(player_chunks) - 1:
+            response += f"\n📋 **Total Players:** {len(players)}"
         
-        # Calculate average profit per game
-        avg_profit = actual_profit / games_with_transactions if games_with_transactions > 0 else 0
-        
-        response += (
-            f"🆔 **{player_id}** | 👤 **{name}**\n"
-            f"💰 **Profit:** {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
-            f"💳 **Transactions:** {actual_buyins:.1f} buy-ins | {actual_rebuys:.1f} rebuys | {actual_cashouts:.1f} cashouts\n"
-            f"🎮 **Games:** {games_played} played | {games_with_transactions} with transactions\n"
-            f"📈 **Win Rate:** {win_rate}\n"
-            f"📊 **Avg/Game:** {'+' if avg_profit > 0 else ''}{avg_profit:.1f}\n"
-            "─" * 40 + "\n"
-        )
+        try:
+            bot.reply_to(message, response, parse_mode='Markdown')
+        except Exception as e:
+            # If Markdown fails, send without formatting
+            try:
+                bot.reply_to(message, response)
+            except Exception as e2:
+                logger.error(f"Failed to send check_db message: {e2}")
+                bot.reply_to(message, f"Error sending data: {str(e2)[:100]}")
     
-    bot.reply_to(message, response, parse_mode='Markdown')
     logger.info(f"Admin (Telegram ID: {message.from_user.id}) checked database")
 
 
