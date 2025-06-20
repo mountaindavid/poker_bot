@@ -163,7 +163,34 @@ def init_db():
                     ON CONFLICT (setting_name) DO NOTHING
                 ''', ('send_notifications', True))  # Default to True for notifications
 
+                # Add total_rebuys column if it doesn't exist
+                cursor.execute('''
+                    ALTER TABLE players ADD COLUMN IF NOT EXISTS total_rebuys NUMERIC(10,1) DEFAULT 0.0
+                ''')
+                
+                # Update total_rebuys from existing transactions
+                cursor.execute('''
+                    UPDATE players 
+                    SET total_rebuys = COALESCE(
+                        (SELECT SUM(amount) FROM transactions 
+                         WHERE transactions.player_id = players.id AND transactions.type = 'rebuy'), 
+                        0.0
+                    )
+                ''')
+
                 logger.info("Database initialized successfully")
+
+        # Run migrations to update schema
+        try:
+            from migrations import run_all_migrations
+            logger.info("Running database migrations...")
+            run_all_migrations()
+            logger.info("Migrations completed successfully")
+        except ImportError:
+            logger.warning("Migrations module not found, skipping migrations")
+        except Exception as e:
+            logger.error(f"Error running migrations: {e}")
+            # Don't raise here, as the basic tables are already created
 
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
@@ -502,8 +529,8 @@ def process_rebuy(message, name, game_id, player_id):
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
                   (player_id, game_id, -amount, 'rebuy'))
 
-        # Update total buy-in
-        c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
+        # Update total rebuys (not total_buyin)
+        c.execute("UPDATE players SET total_rebuys = total_rebuys + %s WHERE id = %s", (amount, player_id))
 
         conn.commit()
         bot.reply_to(message, f"✅ {name} made a rebuy of {amount:.1f}{suits} in game #{game_id}.")
@@ -655,8 +682,10 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         c.execute("SELECT amount, type FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         transactions = c.fetchall()
         for amount, trans_type in transactions:
-            if trans_type in ['buyin', 'rebuy']:
+            if trans_type == 'buyin':
                 c.execute("UPDATE players SET total_buyin = total_buyin - %s WHERE id = %s", (-amount, player_id))
+            elif trans_type == 'rebuy':
+                c.execute("UPDATE players SET total_rebuys = total_rebuys - %s WHERE id = %s", (-amount, player_id))
             elif trans_type == 'cashout':
                 c.execute("UPDATE players SET total_cashout = total_cashout - %s WHERE id = %s", (amount, player_id))
         c.execute("DELETE FROM transactions WHERE player_id = %s AND game_id = %s", (player_id, game_id))
@@ -668,8 +697,8 @@ def process_reset_password(message, game_id, correct_password, player_id, name):
         logger.info(f"Player {name} (ID: {player_id}) left from game #{game_id}")
     except Exception as e:
         print("Error in leaving process:", e)
-        bot.reply_to(message, "❌ Error in leaving process. Try to /leave again.")
-        logger.error(f"Error leaving player {name} in game #{game_id}: {e}")
+        bot.reply_to(message, "❌ Try to /leave again.")
+        logger.error(f"Error leaving game #{game_id} for {name}: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -769,16 +798,28 @@ def overall_results(message):
     c.execute("""
                 SELECT p.name, 
                        p.games_played, 
-                       CAST(p.total_cashout - p.total_buyin AS NUMERIC(10,1)) as total_profit,
+                       CAST(
+                           p.total_cashout - p.total_buyin AS NUMERIC(10,1)
+                       ) as total_profit,
                        SUM(CASE WHEN s.total > 0 THEN 1 ELSE 0 END) as positive_games,
-                       COUNT(DISTINCT s.game_id) as total_games
+                       COUNT(DISTINCT s.game_id) as total_games,
+                       CAST(
+                           COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
+                       ) as total_buyins,
+                       CAST(
+                           COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
+                       ) as total_rebuys,
+                       CAST(
+                           COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)
+                       ) as total_cashouts
                 FROM players p
                 LEFT JOIN (
                     SELECT player_id, game_id, SUM(amount) as total
                     FROM transactions
                     GROUP BY player_id, game_id
                 ) s ON s.player_id = p.id
-                GROUP BY p.id
+                LEFT JOIN transactions t ON t.player_id = p.id
+                GROUP BY p.id, p.name, p.games_played, p.total_buyin, p.total_cashout
             """)
     results = c.fetchall()
     conn.close()
@@ -789,20 +830,24 @@ def overall_results(message):
 
     # Create table header
     response = "📊 Overall Results:\n"
-    response += f"{'Name':<15} | {'Games':<8} | {'Total $':<10} | {'Profitable Games':<18}\n"
-    response += "-" * 55 + "\n"
+    response += f"{'Name':<15} | {'Games':<8} | {'Total $':<10} | {'Buy-ins':<10} | {'Rebuys':<10} | {'Cashouts':<10}\n"
+    response += "-" * 75 + "\n"
 
     # Fill table rows
-    for name, games_played, total_profit, positive_games, total_games in results:
+    for name, games_played, total_profit, positive_games, total_games, total_buyins, total_rebuys, total_cashouts in results:
         total_profit = total_profit or 0  # Handle NULL for players with no transactions
         total_games = total_games or 0
         positive_games = positive_games or 0
         profitable_percent = (positive_games / total_games * 100) if total_games > 0 else 0
+        
+        # Calculate actual profit from transactions
+        actual_profit = total_cashouts - (total_buyins + total_rebuys)
+        
         # Truncate name to 15 characters
         name = name[:15]
-        # Format total_profit to ensure consistent width
-        profit_str = f"{'+' if total_profit > 0 else ''}{total_profit:.1f}"
-        response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {profitable_percent:>5.1f}% ({positive_games}/{total_games})\n"
+        # Format actual_profit to ensure consistent width
+        profit_str = f"{'+' if actual_profit > 0 else ''}{actual_profit:.1f}"
+        response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {total_buyins:<10.1f} | {total_rebuys:<10.1f} | {total_cashouts:<10.1f}\n"
 
     bot.reply_to(message, response)
     logger.info(f"User (Telegram ID: {message.from_user.id}) requested overall results")
@@ -843,7 +888,16 @@ def check_db(message):
         return
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM players")
+    c.execute("""
+        SELECT p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played,
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'buyin' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_buyins,
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'rebuy' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_rebuys,
+               CAST(COALESCE(SUM(CASE WHEN t.type = 'cashout' THEN t.amount ELSE 0 END), 0) AS NUMERIC(10,1)) as actual_cashouts
+        FROM players p
+        LEFT JOIN transactions t ON t.player_id = p.id
+        GROUP BY p.id, p.telegram_id, p.name, p.total_buyin, p.total_cashout, p.registered_at, p.games_played
+        ORDER BY p.id
+    """)
     players = c.fetchall()
     conn.close()
 
@@ -853,12 +907,18 @@ def check_db(message):
 
     response = "Players:\n"
     for player in players:
-        player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played = player
+        player_id, telegram_id, name, total_buyin, total_cashout, registered_at, games_played, actual_buyins, actual_rebuys, actual_cashouts = player
+        
+        # Calculate actual profit from transactions
+        actual_profit = actual_cashouts - (actual_buyins + actual_rebuys)
+        
         response += (
             f"🆔 ID: {player_id}\n"
             f"👤 Name: {name}\n"
             f"📱 Telegram ID: {telegram_id}\n"
-            f"💰 Total profit: {(total_cashout - total_buyin):.1f}\n"
+            f"💰 Total profit (from transactions): {'+' if actual_profit > 0 else ''}{actual_profit:.1f}\n"
+            f"💳 Buy-ins: {actual_buyins:.1f} | Rebuys: {actual_rebuys:.1f} | Cashouts: {actual_cashouts:.1f}\n"
+            f"📊 Legacy profit (from players table): {'+' if (total_cashout - total_buyin) > 0 else ''}{(total_cashout - total_buyin):.1f}\n"
             f"{suits}Games played: {games_played}\n"
             f"Registered: {registered_at}\n"
             "-----------------------\n"
