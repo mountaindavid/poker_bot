@@ -197,16 +197,16 @@ def init_db():
         raise
 
 
-@bot.message_handler(commands=['menu'])
-@safe_handler
-def help_command(message):
-    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.row('/new_game', '/join')
-    keyboard.row('/rebuy', '/cashout')
-    keyboard.row('/leave', '/end_game')
-    keyboard.row('/game_results', '/admin')
-
-    bot.send_message(message.chat.id, "🃏 Tap a command to execute:", reply_markup=keyboard)
+# @bot.message_handler(commands=['menu'])
+# @safe_handler
+# def help_command(message):
+#     keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+#     keyboard.row('/new_game', '/join')
+#     keyboard.row('/rebuy', '/cashout')
+#     keyboard.row('/leave', '/end_game')
+#     keyboard.row('/game_results', '/admin')
+#
+#     bot.send_message(message.chat.id, "🃏 Tap a command to execute:", reply_markup=keyboard)
 
 
 @bot.message_handler(commands=['admin'])
@@ -242,9 +242,10 @@ def register(message):
     conn.close()
     bot.reply_to(message,
                  f"{name}, you are registered!\n\n"
-                 f"Push /menu "
+                 f"Open Menu and start playing!"
                  )
     logger.info(f"Player {name} (Telegram ID: {user_id}) registered")
+
 
 
 # New game
@@ -359,7 +360,7 @@ def join_game(message):
     c.execute("SELECT id, password FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     game = c.fetchone()
     if not game:
-        bot.reply_to(message, "❌ No active game found.")
+        bot.reply_to(message, "❌ No active game found. Create a /new_game")
         conn.close()
         return
     game_id, password = game
@@ -367,6 +368,7 @@ def join_game(message):
     bot.register_next_step_handler(message, lambda m: process_join_password(m, game_id, password, player_id, name))
     conn.close()
     logger.info(f"Player {name} (Telegram ID: {user_id}) initiated joining game #{game_id}")
+
 
 
 def process_join_password(message, game_id, correct_password, player_id, name):
