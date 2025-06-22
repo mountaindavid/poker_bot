@@ -397,34 +397,41 @@ def process_buyin(message, name, game_id, player_id):
     suits = random.choice(['♠️', '♣️', '♥️', '♦️'])
     try:
         amount_text = message.text.strip()
+        print(f"DEBUG: amount_text = '{amount_text}'")
         amount = round(float(amount_text), 1)
+        print(f"DEBUG: amount = {amount}")
         if not (amount > 0 and amount <= 5000):
-            raise ValueError("Amount must be from 0 to 5000 (example 20).")
+            raise ValueError("Amount must be from 1 to 5000 (example 20).")
         user_id = message.from_user.id
+        print(f"DEBUG: user_id = {user_id}, game_id = {game_id}, player_id = {player_id}")
 
         conn = get_db_connection()
         c = conn.cursor()
 
         # Verify that the game is still active and the player is still not in it
         c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
-        if not c.fetchone():
+        game_check = c.fetchone()
+        print(f"DEBUG: game_check = {game_check}")
+        if not game_check:
             bot.reply_to(message, "❌ Game is no longer active. /join or create a /new_game")
             conn.close()
             return
 
         # Check if already joined (double-check in case of race conditions)
         c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
-        if c.fetchone():
+        already_joined = c.fetchone()
+        print(f"DEBUG: already_joined = {already_joined}")
+        if already_joined:
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
             conn.close()
             return
 
         # Add player to game and increment games_played
-        c.execute("INSERT INTO game_players (player_id, game_id) VALUES (%s, %s)", (player_id, game_id))
+        c.execute("INSERT INTO game_players (player_id, game_id) VALUES (%s, %s) ON CONFLICT (player_id, game_id) DO NOTHING", (player_id, game_id))
         c.execute("UPDATE players SET games_played = games_played + 1 WHERE id = %s", (player_id,))
 
         # Save the buy-in transaction (amount is negative)
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                   (player_id, game_id, -amount, 'buyin'))
 
         # Update total buy-in
@@ -436,7 +443,10 @@ def process_buyin(message, name, game_id, player_id):
                             exclude_telegram_id=user_id)
         logger.info(f"Player {name} (ID: {player_id}) joined game #{game_id} with buy-in {amount:.1f}")
     except Exception as e:
-        print("Error in buy-in process:", e)
+        print(f"Error in buy-in process: {e}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
         bot.reply_to(message, "❌ Try to /join again. Enter number like 20")
         logger.error(f"Error processing buy-in for {name} in game #{game_id}: {e}")
     finally:
@@ -503,7 +513,7 @@ def process_rebuy(message, name, game_id, player_id):
             return
 
         # Insert rebuy record
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                   (player_id, game_id, -amount, 'rebuy'))
 
         # Update total rebuys (not total_buyin)
@@ -582,7 +592,7 @@ def process_cashout(message, name, game_id, player_id):
             return
 
         # Save cashout
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                   (player_id, game_id, amount, 'cashout'))
 
         # Update total cashout
@@ -1101,7 +1111,7 @@ def process_adjust_amount(message, game_id, player_id, action_type, name):
             conn.close()
             return
         amount_value = -amount if action_type == 'rebuy' else amount
-        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
+        c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                   (player_id, game_id, amount_value, action_type))
         if action_type == 'rebuy':
             c.execute("UPDATE players SET total_rebuys = total_rebuys + %s WHERE id = %s", (amount, player_id))
