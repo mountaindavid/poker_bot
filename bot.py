@@ -405,25 +405,14 @@ def process_buyin(message, name, game_id, player_id):
         conn = get_db_connection()
         c = conn.cursor()
 
-        # Get the ID of the currently active game
-        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
-        row = c.fetchone()
-        if not row:
-            bot.reply_to(message, "❌ No active game found. /join or create a /new_game")
+        # Verify that the game is still active and the player is still not in it
+        c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ Game is no longer active. /join or create a /new_game")
             conn.close()
             return
-        game_id = row[0]
 
-        # Check if the player is registered
-        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
-        player = c.fetchone()
-        if not player:
-            bot.reply_to(message, "❌ You are not registered. Use /start.")
-            conn.close()
-            return
-        player_id = player[0]
-
-        # Check if already joined
+        # Check if already joined (double-check in case of race conditions)
         c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         if c.fetchone():
             bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
@@ -506,23 +495,12 @@ def process_rebuy(message, name, game_id, player_id):
         conn = get_db_connection()
         c = conn.cursor()
 
-        # Get active game
-        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
-        row = c.fetchone()
-        if not row:
-            bot.reply_to(message, "❌ No active game found.")
+        # Verify that the game is still active
+        c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ Game is no longer active.")
             conn.close()
             return
-        game_id = row[0]
-
-        # Check player registration
-        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
-        player = c.fetchone()
-        if not player:
-            bot.reply_to(message, "❌ You are not registered. Use /start.")
-            conn.close()
-            return
-        player_id = player[0]
 
         # Insert rebuy record
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
@@ -596,23 +574,12 @@ def process_cashout(message, name, game_id, player_id):
         conn = get_db_connection()
         c = conn.cursor()
 
-        # Find active game
-        c.execute("SELECT id FROM games WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
-        row = c.fetchone()
-        if not row:
-            bot.reply_to(message, "❌ No active game session.")
+        # Verify that the game is still active
+        c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
+        if not c.fetchone():
+            bot.reply_to(message, "❌ Game is no longer active.")
             conn.close()
             return
-        game_id = row[0]
-
-        # Get player ID
-        c.execute("SELECT id FROM players WHERE telegram_id = %s", (user_id,))
-        player = c.fetchone()
-        if not player:
-            bot.reply_to(message, "❌ You are not registered. Use /start.")
-            conn.close()
-            return
-        player_id = player[0]
 
         # Save cashout
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s)",
@@ -865,8 +832,18 @@ def overall_results(message):
         avg_str = f"{'+' if avg_profit > 0 else ''}{avg_profit:.1f}"
         response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {win_rate:<12} | {avg_str:<10}\n"
 
-    bot.reply_to(message, response)
-    logger.info(f"User (Telegram ID: {message.from_user.id}) requested overall results")
+    total_in = total_buyins + total_rebuys
+    total_out = total_cashouts
+    diff = round(total_in - total_out, 1)
+
+    response += (
+        f"\n💰 Game total:\n"
+        f"  Buy-ins + Rebuys = {total_in:.1f}\n"
+        f"  Cashouts = {total_out:.1f}\n"
+        f"  Difference = {diff:.1f} {'✅ OK — balanced' if diff == 0 else ''}"
+    )
+
+    bot.send_message(chat_id, response)
 
 
 # average profit per game

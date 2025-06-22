@@ -78,7 +78,6 @@ python main.py
 - `/overall_results` - Общая статистика
 
 ### Административные команды
-- `/check_db` - Просмотр всех игроков
 - `/remove_player` - Удалить игрока
 - `/adjust` - Корректировка транзакций
 - `/allow_new_game` - Разрешить создание игр
@@ -193,3 +192,12 @@ tail -f bot.log
 ## 📄 Лицензия
 
 MIT License 
+
+
+PGPASSWORD="cYkKaLpSYNEfTwogLZDicHPjdehxpetg" pg_dump \
+  -h crossover.proxy.rlwy.net \
+  -p 14418 \
+  -U postgres \
+  -d railway \
+  -F p \
+  -f railway_dump.sql

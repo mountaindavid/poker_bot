@@ -106,8 +106,7 @@ def run_all_migrations():
         migrator.run_migration(
             "add_data_constraints",
             [
-                "ALTER TABLE transactions ADD CONSTRAINT IF NOT EXISTS check_amount_positive CHECK (amount > 0)",
-                "ALTER TABLE transactions ADD CONSTRAINT IF NOT EXISTS check_type_valid CHECK (type IN ('buyin', 'rebuy', 'cashout'))"
+                "ALTER TABLE transactions ADD CONSTRAINT check_type_valid CHECK (type IN ('buyin', 'rebuy', 'cashout'))"
             ],
             "Add constraints to ensure data integrity"
         )
