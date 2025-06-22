@@ -408,7 +408,7 @@ def process_buyin(message, name, game_id, player_id):
         conn = get_db_connection()
         c = conn.cursor()
 
-        # Verify that the game is still active and the player is still not in it
+        # Verify that the game is still active
         c.execute("SELECT id FROM games WHERE id = %s AND is_active = TRUE", (game_id,))
         game_check = c.fetchone()
         print(f"DEBUG: game_check = {game_check}")
@@ -417,18 +417,15 @@ def process_buyin(message, name, game_id, player_id):
             conn.close()
             return
 
-        # Check if already joined (double-check in case of race conditions)
+        # Check if already joined
         c.execute("SELECT id FROM game_players WHERE player_id = %s AND game_id = %s", (player_id, game_id))
         already_joined = c.fetchone()
         print(f"DEBUG: already_joined = {already_joined}")
-        if already_joined:
-            bot.reply_to(message, f"{suits}{name}, you are already in game #{game_id}.")
-            conn.close()
-            return
-
-        # Add player to game and increment games_played
-        c.execute("INSERT INTO game_players (player_id, game_id) VALUES (%s, %s) ON CONFLICT (player_id, game_id) DO NOTHING", (player_id, game_id))
-        c.execute("UPDATE players SET games_played = games_played + 1 WHERE id = %s", (player_id,))
+        
+        if not already_joined:
+            # Add player to game and increment games_played only if not already joined
+            c.execute("INSERT INTO game_players (player_id, game_id) VALUES (%s, %s) ON CONFLICT (player_id, game_id) DO NOTHING", (player_id, game_id))
+            c.execute("UPDATE players SET games_played = games_played + 1 WHERE id = %s", (player_id,))
 
         # Save the buy-in transaction (amount is negative)
         c.execute("INSERT INTO transactions (player_id, game_id, amount, type) VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
@@ -438,10 +435,17 @@ def process_buyin(message, name, game_id, player_id):
         c.execute("UPDATE players SET total_buyin = total_buyin + %s WHERE id = %s", (amount, player_id))
 
         conn.commit()
-        bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount:.1f}{suits}.")
-        notify_game_players(game_id, f"👤 {name} joined game #{game_id} with a buy-in of {amount:.1f}{suits}!",
-                            exclude_telegram_id=user_id)
-        logger.info(f"Player {name} (ID: {player_id}) joined game #{game_id} with buy-in {amount:.1f}")
+        
+        if already_joined:
+            bot.reply_to(message, f"✅ {name} added a buy-in of {amount:.1f}{suits} to game #{game_id}.")
+            notify_game_players(game_id, f"💰 {name} added a buy-in of {amount:.1f}{suits} to game #{game_id}!",
+                                exclude_telegram_id=user_id)
+            logger.info(f"Player {name} (ID: {player_id}) added buy-in of {amount:.1f} to game #{game_id}")
+        else:
+            bot.reply_to(message, f"✅ {name} has joined game #{game_id} with a buy-in of {amount:.1f}{suits}.")
+            notify_game_players(game_id, f"👤 {name} joined game #{game_id} with a buy-in of {amount:.1f}{suits}!",
+                                exclude_telegram_id=user_id)
+            logger.info(f"Player {name} (ID: {player_id}) joined game #{game_id} with buy-in {amount:.1f}")
     except Exception as e:
         print(f"Error in buy-in process: {e}")
         print(f"Error type: {type(e)}")
@@ -743,7 +747,7 @@ def send_game_results_to_user(game_id, chat_id):
     total_rebuys = 0
     total_cashouts = 0
 
-    for name, buyins, rebuys, cashouts, total in results:
+    for player_id, name, buyins, rebuys, cashouts, total in results:
         total_buyins += buyins
         total_rebuys += rebuys
         total_cashouts += cashouts
@@ -809,6 +813,22 @@ def overall_results(message):
     """)
     win_rates = {row[0]: (row[1], row[2]) for row in c.fetchall()}
     
+    # Get bank statistics for all games
+    c.execute("""
+        SELECT 
+            MAX(total_bank) as max_bank,
+            AVG(total_bank) as avg_bank
+        FROM (
+            SELECT game_id,
+                   SUM(CASE WHEN type IN ('buyin', 'rebuy') THEN ABS(amount) ELSE 0 END) as total_bank
+            FROM transactions 
+            GROUP BY game_id
+        ) game_banks
+    """)
+    bank_stats = c.fetchone()
+    max_bank = bank_stats[0] if bank_stats[0] else 0
+    avg_bank = bank_stats[1] if bank_stats[1] else 0
+    
     conn.close()
 
     if not players:
@@ -821,9 +841,9 @@ def overall_results(message):
     response += "-" * 70 + "\n"
 
     # Fill table rows
-    for player_id, name, games_played, total_buyins, total_rebuys, total_cashouts in players:
+    for player_id, name, games_played, player_buyins, player_rebuys, player_cashouts in players:
         # Calculate actual profit from transactions
-        actual_profit = total_cashouts - (total_buyins + total_rebuys)
+        actual_profit = player_cashouts - (player_buyins + player_rebuys)
         
         # Get win rate
         win_rate = "N/A"
@@ -842,16 +862,10 @@ def overall_results(message):
         avg_str = f"{'+' if avg_profit > 0 else ''}{avg_profit:.1f}"
         response += f"{name:<15} | {games_played:<8} | {profit_str:<10} | {win_rate:<12} | {avg_str:<10}\n"
 
-    total_in = total_buyins + total_rebuys
-    total_out = total_cashouts
-    diff = round(total_in - total_out, 1)
-
-    response += (
-        f"\n💰 Game total:\n"
-        f"  Buy-ins + Rebuys = {total_in:.1f}\n"
-        f"  Cashouts = {total_out:.1f}\n"
-        f"  Difference = {diff:.1f} {'✅ OK — balanced' if diff == 0 else ''}"
-    )
+    # Add bank statistics
+    response += f"\n💰 Bank Statistics:\n"
+    response += f"  Max Bank: {max_bank:.1f}\n"
+    response += f"  Avg Bank: {avg_bank:.1f}"
 
     bot.send_message(message.chat.id, response)
 
