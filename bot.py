@@ -853,7 +853,7 @@ def overall_results(message):
         f"  Difference = {diff:.1f} {'✅ OK — balanced' if diff == 0 else ''}"
     )
 
-    bot.send_message(chat_id, response)
+    bot.send_message(message.chat.id, response)
 
 
 # average profit per game
