@@ -747,7 +747,7 @@ def send_game_results_to_user(game_id, chat_id):
     total_rebuys = 0
     total_cashouts = 0
 
-    for player_id, name, buyins, rebuys, cashouts, total in results:
+    for name, buyins, rebuys, cashouts, total in results:
         total_buyins += buyins
         total_rebuys += rebuys
         total_cashouts += cashouts
